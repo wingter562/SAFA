@@ -1,0 +1,349 @@
+# semi-async_FedAvg.py
+# Pytorch+PySyft implementation of the primal Federated Averaging (FedAvg) algorithm for Federated Learning,
+# proposed by:
+# [] McMahan, B., Moore, E., Ramage, D., Hampson, S., & y Arcas, B. A. (2017, April). Communication-Efficient Learning
+#   of Deep Networks from Decentralized Data. In Artificial Intelligence and Statistics, vol. 54, pp. 1273-1282.
+# @Author  : wwt
+# @Date    : 2019-7-23
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import copy
+import sys
+import os
+import random
+import numpy as np
+import syft as sy
+import matplotlib.pyplot as plt
+from learning_tasks import MLmodelReg
+from learning_tasks import MLmodelSVM
+from learning_tasks import svmLoss
+import utils
+
+
+def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, verbose=True):
+    """
+    Execute one EPOCH of training process of any machine learning model on all clients
+    :param models: a list of model prototypes corresponding to clients
+    :param picked_ids: selected client indices for local training
+    :param env_cfg: environment configurations
+    :param cm_map: the client-model map, as a dict
+    :param fdl: an instance of FederatedDataLoader
+    :param task_cfg: task training settings, including learning rate, optimizer, etc.
+    :param last_loss_rep: loss reports in last run
+    :param verbose: display batch progress or not.
+    :return: epoch training loss of each client, batch-summed
+    """
+    if len(picked_ids) == 0:  # no training happens
+        return last_loss_rep
+    # extract settings
+    n_models = env_cfg.n_clients  # # of clients
+    # initialize loss report, keep loss tracks for idlers, clear those for participants
+    client_train_loss_vec = last_loss_rep
+    for id in picked_ids:
+        client_train_loss_vec[id] = 0.0
+    # Disable printing
+    if not verbose:
+        sys.stdout = open(os.devnull, 'w')
+    # initialize training mode
+    for m in range(n_models):
+        models[m].train()
+
+    # Define loss based on task
+    if task_cfg.loss == 'mse':  # regression task
+        loss_func = nn.MSELoss(reduction='mean')  # cannot back-propagate with 'reduction=sum'
+    elif task_cfg.loss == 'svm_loss':  # SVM task
+        loss_func = svmLoss(reduction='mean')  # self-defined loss, have to use default reduction 'mean'
+
+    # one optimizer for each model (re-instantiate optimizers to clear any possible momentum
+    optimizers = []
+    for i in range(n_models):
+        if task_cfg.optimizer == 'SGD':
+            optimizers.append(optim.SGD(models[i].parameters(), lr=task_cfg.lr))
+        elif task_cfg.optimizer == 'Adam':
+            optimizers.append(optim.Adam(models[i].parameters(), lr=task_cfg.lr))
+        else:
+            print('Err> Invalid optimizer %s specified' % task_cfg.optimizer)
+
+    # begin an epoch of training
+    for batch_id, (inputs, labels) in enumerate(fdl):
+        client = inputs.location  # training location (i.e.,the client) recorded by Syft, an object
+        model_id = cm_map[client.id]  # locate the right model index
+        # neglect non-participants
+        if model_id not in picked_ids:
+            continue
+
+        # mini-batch GD
+        print('\n> Batch #', batch_id, 'on', inputs.location.id)
+        print('>   model_id = ', model_id)
+        model = models[model_id]
+        optimizer = optimizers[model_id]
+        # send out for local training
+        model.send(client)
+        # gradient descent procedure
+        optimizer.zero_grad()
+        y_hat = model(inputs)
+        # loss
+        loss = loss_func(y_hat, labels)
+        loss.backward()
+        # weights
+        optimizer.step()
+
+        # display
+        loss_ = loss.get()  # batch-total loss
+        print('>   batch loss = ', loss_.item())  # avg. batch loss
+        client_train_loss_vec[model_id] += loss_.item()*len(inputs)  # sum up
+        # get back before next send
+        models[model_id] = model.get()
+
+    # Restore printing
+    if not verbose:
+        sys.stdout = sys.__stdout__
+    # end an epoch-training - all clients have traversed their own local data once
+    return client_train_loss_vec
+
+
+def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
+    """
+    Evaluate client models locally and return a list of loss/error
+    :param models: a list of model prototypes corresponding to clients
+    :param picked_ids: selected client indices for local training
+    :param n_models: # of models, i.e., clients
+    :param cm_map: the client-model map, as a dict
+    :param fdl: an instance of FederatedDataLoader
+    :param last_loss_rep: loss reports in last run
+    :return: epoch test loss of each client, batch-summed
+    """
+    # initialize loss report, keep loss tracks for idlers, clear those for participants
+    client_test_loss_vec = last_loss_rep
+    for id in picked_ids:
+        client_test_loss_vec[id] = 0.0
+    # judge model type
+    if isinstance(models[0], MLmodelReg):  # regression model
+        loss_func = nn.MSELoss(reduction='sum')
+    # initialize evaluation mode
+    for m in range(n_models):
+        models[m].eval()
+    # local evaluation, batch-wise
+    with torch.no_grad():
+        for batch_id, (inputs, labels) in enumerate(fdl):
+            client = inputs.location  # training location (i.e.,the client) recorded by Syft
+            model_id = cm_map[client.id]  # locate the right model index
+            # neglect non-participants
+            if model_id not in picked_ids:
+                continue
+            model = models[model_id]
+            # send out for local test
+            model.send(client)
+            # inference
+            y_hat = model(inputs)
+
+            # loss
+            loss = loss_func(y_hat, labels)
+            client_test_loss_vec[model_id] += loss.get().item()
+
+            models[model_id] = model.get()
+
+    return client_test_loss_vec
+
+
+def global_test(model, n_clients, cm_map, fdl):
+    """
+    Testing the aggregated global model by averaging its error on each local data
+    :param model: the global model
+    :param n_clients: # of models, i.e., clients
+    :param cm_map: the client-model map, as a dict
+    :param fdl: FederatedDataLoader
+    :return: global model's loss on each client, as a vector
+    """
+    test_sum_loss_vec = [0 for i in range(n_clients)]
+    # judge model type
+    if isinstance(model, MLmodelReg):  # regression model
+        loss_func = nn.MSELoss(reduction='sum')
+    # initialize evaluation mode
+    model.eval()
+    # local evaluation, batch-wise
+    for batch_id, (inputs, labels) in enumerate(fdl):
+        client = inputs.location  # training location (i.e.,the client) recorded by Syft
+        model_id = cm_map[client.id]
+        # send model to data
+        model.send(client)
+        # inference
+        y_hat = model(inputs)
+
+        # loss
+        loss = loss_func(y_hat, labels)
+        test_sum_loss_vec[model_id] += loss.get().item()
+
+        model.get()
+
+    return test_sum_loss_vec
+
+
+def aggregate(models, local_shards_sizes, data_size):
+    """
+    The function implements aggregation step (FedAvg), i.e., w = sum_k(n_k/n * w_k)
+    :param models: a list of local models
+    :param picked_ids: selected client indices for local training
+    :param local_shards_sizes: a list of local data sizes, aligned with the orders of local models, say clients.
+    :param data_size: total data size
+    :return: a global model
+    """
+    print('>   Aggregating (FedAvg)...')
+    global_model_params = []
+    client_weights_vec = np.array(local_shards_sizes) / data_size  # client weights (i.e., n_k / n)
+    for m in range(len(models)):  # for each local model
+        p_pointer = 0
+        for param in models[m].parameters():
+            if m == 0:  # use the first model to shape the global one
+                global_model_params.append(param.data * client_weights_vec[m])
+            else:
+                global_model_params[p_pointer] += param.data * client_weights_vec[m]  # sum up the corresponding param
+            p_pointer += 1
+
+    # create a global model instance for return
+    global_model = copy.deepcopy(models[0])
+    p_pointer = 0
+    for param in global_model.parameters():
+        param.data.copy_(global_model_params[p_pointer])
+        p_pointer += 1
+
+    return global_model
+
+
+def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
+           clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, round_interval):
+    # traces
+    reporting_train_loss_vec = [0 for _ in range(env_cfg.n_clients)]
+    reporting_test_loss_vec = [0 for _ in range(env_cfg.n_clients)]
+    epoch_train_trace = []
+    epoch_test_trace = []
+    make_trace = []
+    pick_trace = []
+    round_trace = []
+
+    # Counters
+    # 1. Global timers, 1 unit = # of batches / client performance, where performance is defined as batch efficiency
+    global_timer = 0.0
+    # 2. Client timers - record work time of each client
+    client_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
+    client_round_timers = []  # in current round
+    # 3. Futile counters - progression (i,e, work time) in vain caused by local crashes
+    client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
+    # 4. best loss (global)
+    best_loss = float('inf')
+    best_model = None
+
+    # begin training: global rounds
+    for rd in range(env_cfg.n_rounds):
+        print('\n> Round #%d' % rd)
+        # reset timers
+        client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
+        # randomly pick a specified fraction of clients to launch training
+        n_picks = int(env_cfg.n_clients * env_cfg.subset_pct)
+        picked_ids = random.sample(range(env_cfg.n_clients), n_picks)
+        picked_ids.sort()
+        pick_trace.append(picked_ids)  # tracing
+        print('> Clients selected: ', picked_ids)
+        # simulate device or network failure
+        crash_ids = crash_trace[rd]
+        client_round_progress = progress_trace[rd]
+        make_ids = [c_id for c_id in picked_ids if c_id not in crash_ids]
+
+        # tracing
+        make_trace.append(make_ids)
+        print('> Clients crashed: ', crash_ids)
+
+        # Local training step
+        for epo in range(env_cfg.n_epochs):  # local epochs (same # of epochs for each client)
+            print('\n> local epoch #%d' % epo)
+            # invoke mini-batch training on selected clients, from the 2nd epoch
+            if rd + epo == 0:  # 1st epoch all-in to get start points
+                bak_make_ids = copy.deepcopy(make_ids)
+                make_ids = list(range(env_cfg.n_clients))
+            elif rd == 0 and epo == 1:  # resume
+                make_ids = bak_make_ids
+            reporting_train_loss_vec = train(models, make_ids, env_cfg, cm_map, fed_loader_train, task_cfg,
+                                             reporting_train_loss_vec, verbose=False)
+            # add to trace
+            epoch_train_trace.append(
+                np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
+            print('>   %d clients train loss vector this epoch:' % env_cfg.n_clients,
+                  np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
+
+            # local test reports
+            reporting_test_loss_vec = local_test(models, make_ids, env_cfg.n_clients, cm_map, fed_loader_test,
+                                                 reporting_test_loss_vec)
+            # add to trace
+            epoch_test_trace.append(
+                np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
+            print('>   %d clients test loss vector this epoch:' % env_cfg.n_clients,
+                  np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
+
+        # Aggregation step
+        print('\n> Aggregation step (Round #%d)' % rd)
+        global_model = aggregate(models, client_shard_sizes, data_size)
+
+        # Reporting phase: distributed test of the global model
+        post_aggre_loss_vec = global_test(global_model, env_cfg.n_clients, cm_map, fed_loader_test)
+        print('>   post-aggregation loss reports  = ',
+              np.array(post_aggre_loss_vec) / ((np.array(client_shard_sizes)) * env_cfg.test_pct))
+        # overall loss, i.e., objective (1) in McMahan's paper
+        overall_loss = np.array(post_aggre_loss_vec).sum() / (data_size*env_cfg.test_pct)
+        # update so-far best
+        if overall_loss < best_loss:
+            best_loss = overall_loss
+            best_model = global_model
+            best_rd = rd
+        if env_cfg.keep_best:  # if to keep best
+            global_model = best_model
+            overall_loss = best_loss
+        print('>   post-aggregation loss avg = ', overall_loss)
+        round_trace.append(overall_loss)
+
+        # dispatch global model back to clients
+        print('>   Dispatching global model to clients')
+        for i in range(env_cfg.n_clients):
+            models[i] = copy.deepcopy(global_model)
+
+        # update timers
+        for c_id in range(env_cfg.n_clients):
+            if c_id in picked_ids:
+                # time = # of batches run / perf
+                client_round_timers[c_id] = env_cfg.n_epochs / env_cfg.batch_size * client_shard_sizes[c_id] \
+                                            / clients_perf_vec[c_id]
+                client_timers[c_id] += client_round_timers[c_id]
+                if c_id in crash_ids:  # failed clients
+                    client_futile_timers[c_id] += client_round_timers[c_id] * client_round_progress[c_id]
+        round_time = round_interval if len(crash_ids) > 0 else max(client_round_timers)  # fixed interval if crash
+        global_timer += round_time
+
+        print('> Round client run time:', client_round_timers)  # round estimated finish time
+        print('> Round client progress:', client_round_progress)  # round actual progress at last
+
+    # Traces
+    print('> Train trace:')
+    utils.show_epoch_trace(epoch_train_trace, env_cfg.n_clients, plotting=False, cols=1)  # training trace
+    print('> Test trace:')
+    utils.show_epoch_trace(epoch_test_trace, env_cfg.n_clients, plotting=False, cols=1)
+    print('> Round trace:')
+    utils.show_round_trace(round_trace, plotting=True, title_='Primal FedAvg')
+
+    # display timers
+    print('\n> Experiment stats')
+    print('> Clients run time:', client_timers)
+    print('> Clients futile run time:', client_futile_timers)
+    futile_pcts = np.array(client_futile_timers) / np.array(client_timers)
+    print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
+    print('> Total time consumption:', global_timer)
+
+    # Logging
+    detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
+    utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
+                    round_trace, make_trace, pick_trace, crash_trace, None,
+                    client_timers, client_futile_timers, global_timer,
+                    best_rd, best_loss)
+
+    return best_model, best_rd, best_loss
+
