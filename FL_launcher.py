@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from sklearn import datasets
 from sklearn.svm import SVC
 from learning_tasks import MLmodelReg
+from learning_tasks import MLmodelSVM
 import utils
 import primal_FedAvg
 import semiAysnc_FedAvg
@@ -94,6 +95,23 @@ class TaskSettings:
         self.lr = lr
 
 
+def save_KddCup99_tcpdump_tcp_tofile(fpath):
+    """
+    Fetch (from sklearn.datasets) the KddCup99 tcpdump dataset, extract tcp samples, and save to local as csv
+    :param fpath: local file path to save the dataset
+    :return: KddCup99 dataset, tcp-protocol samples only
+    """
+    xy = utils.fetch_KddCup99_10pct_tcpdump(return_X_y=False)
+    np.savetxt(fpath, xy, delimiter=',', fmt='%.6f',
+               header='duration, src_bytes, dst_bytes, land, urgent, hot, #failed_login, '
+                      'logged_in, #compromised, root_shell, su_attempted, #root, #file_creations, #shells, '
+                      '#access_files, is_guest_login, count, srv_cnt, serror_rate, srv_serror_rate, rerror_rate, '
+                      'srv_rerror_rate, same_srv_rate, diff_srv_rate, srv_diff_host_rate, dst_host_cnt,'
+                      'dst_host_srv_cnt, dst_host_same_srv_rate, dst_host_diff_srv_rate, dst_host_same_src_port_rt,'
+                      'dst_host_srv_diff_host_rate, dst_host_serror_rate, dst_host_srv_serror_rate, '
+                      'dst_host_rerror_rate, dst_host_srv_rerror_rate, label')
+
+
 def init_models(env_cfg, task_cfg):
     """
     Initialize models as per the settings of FL and machine learning task
@@ -105,6 +123,8 @@ def init_models(env_cfg, task_cfg):
     for i in range(env_cfg.n_clients):
         if task_cfg.task_type == 'Reg':
             models.append(MLmodelReg(in_features=task_cfg.in_dim, out_features=task_cfg.out_dim))
+        elif task_cfg.task_type == 'SVM':
+            models.append(MLmodelSVM(in_features=task_cfg.in_dim))
 
     return models
 
@@ -206,31 +226,39 @@ def generate_crash_trace(env_cfg, clients_crash_prob_vec):
 # print(tcp_xy)
 # print(type(tcp_xy[0][0]))
 # print('total_tcp=', len(tcp_xy), 'normal_tcp=', len(tcp_n_xy))  # tcp data view
-x, y = utils.fetch_KddCup99_10pct_tcpdump(return_X_y=True)
-x = utils.normalize(x)  # SVM can't converge with normalization
-print(x)
-print('total=', len(x))
-clf = SVC(kernel='linear')
-clf.fit(x, y)
-decs = clf.decision_function(x)
-neg = 0
-precision = 0
-for k in range(len(y)):
-    print(decs[k], y[k])
 
-exit(0)
+# xy = utils.fetch_KddCup99_10pct_tcpdump(return_X_y=False)
+# exit(0)
+# xy = utils.normalize(xy, expt=-1)  # SVM can't converge with normalization
+# print(xy)
+# print('total=', len(xy))
+# x = xy[:,0:-1]
+# y = xy[:, -1]
+# clf = SVC(kernel='linear')
+# clf.fit(x, y)
+# decs = clf.decision_function(x)
+# neg = 0
+# precision = 0
+# for k in range(len(y)):
+#     print(decs[k], y[k])
+# save_KddCup99_tcpdump_tcp_tofile('data/kddcup99_tcp.csv')
+# exit(0)
 
 if __name__ == '__main__':
     # initialization
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
     ''' Boston housing regression settings'''
-    env_cfg = EnvSettings(n_clients=5, n_rounds=20, n_epochs=2, batch_size=1, train_pct=0.7, subset_pct=0.4,
+    # env_cfg = EnvSettings(n_clients=5, n_rounds=20, n_epochs=2, batch_size=1, train_pct=0.7, subset_pct=0.4,
+    #                       data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
+    #                       dev='cpu', keep_best=False)
+    # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
+    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-2)
+    ''' KddCup99 tcpdump SVM classification settings'''
+    env_cfg = EnvSettings(n_clients=200, n_rounds=20, n_epochs=3, batch_size=100, train_pct=0.7, subset_pct=0.5,
                           data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
                           dev='cpu', keep_best=False)
-    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-2)  # for Boston reg
-    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-2)  # for KddCup99 tcpdump
+    task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
+                            in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2)  # for KddCup99 tcpdump
 
     # kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
@@ -243,15 +271,17 @@ if __name__ == '__main__':
         cm_map['client_'+str(i)] = i  # client i with model i
 
     # load data
-    data = np.loadtxt(task_cfg.path, delimiter=',', skiprows=1)
+    if task_cfg.dataset == 'Boston':
+        data = np.loadtxt(task_cfg.path, delimiter=',', skiprows=1)
+        data = utils.normalize(data)
+    elif task_cfg.dataset == 'tcpdump99':
+        data = np.loadtxt(task_cfg.path, delimiter=',', skiprows=1)
+        data = utils.normalize(data, expt=-1)  # normalize features but not labels (+1/-1 for SVM)
+
     data_size = len(data)
     train_data_size = int(data_size * env_cfg.train_pct)
     test_data_size = data_size - train_data_size
-    data = utils.normalize(data)
-
     data = torch.tensor(data).float()
-    # data_x = data[:, 0:task_cfg.in_dim]
-    # data_y = data[:, task_cfg.out_dim * -1:].reshape(-1, task_cfg.out_dim)  # reshape labels to a column
     data_train_x = data[0:train_data_size, 0:task_cfg.in_dim]  # training data, x
     data_train_y = data[0:train_data_size, task_cfg.out_dim*-1:].reshape(-1, task_cfg.out_dim)  # training data , y
     data_test_x = data[train_data_size:, 0:task_cfg.in_dim]  # test data, x
@@ -280,13 +310,13 @@ if __name__ == '__main__':
     crash_trace, progress_trace = generate_crash_trace(env_cfg, clients_crash_prob_vec)
 
     # specify learning task
-    models = init_models(env_cfg, task_cfg)
-    print('> Launching FL...')
-    # run FL with FedAvg
-    env_cfg.mode = 'Primal FedAvg'
-    best_model, best_rd, final_loss = primal_FedAvg.\
-        run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
-               clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
+    # models = init_models(env_cfg, task_cfg)
+    # print('> Launching FL...')
+    # # run FL with FedAvg
+    # env_cfg.mode = 'Primal FedAvg'
+    # best_model, best_rd, final_loss = primal_FedAvg.\
+    #     run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
+    #            clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
 
     # reinitialize
     models = init_models(env_cfg, task_cfg)

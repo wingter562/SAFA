@@ -53,7 +53,7 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
     # Define loss based on task
     if task_cfg.loss == 'mse':  # regression task
         loss_func = nn.MSELoss(reduction='mean')  # cannot back-propagate with 'reduction=sum'
-    elif task_cfg.loss == 'svm_loss':  # SVM task
+    elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='mean')  # self-defined loss, have to use default reduction 'mean'
 
     # one optimizer for each model (re-instantiate optimizers to clear any possible momentum
@@ -84,6 +84,7 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
         # gradient descent procedure
         optimizer.zero_grad()
         y_hat = model(inputs)
+
         # loss
         loss = loss_func(y_hat, labels)
         loss.backward()
@@ -122,6 +123,8 @@ def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
     # judge model type
     if isinstance(models[0], MLmodelReg):  # regression model
         loss_func = nn.MSELoss(reduction='sum')
+    elif isinstance(models[0], MLmodelSVM):  # regression model
+        loss_func = svmLoss(reduction='sum')
     # initialize evaluation mode
     for m in range(n_models):
         models[m].eval()
@@ -161,8 +164,11 @@ def global_test(model, n_clients, cm_map, fdl):
     # judge model type
     if isinstance(model, MLmodelReg):  # regression model
         loss_func = nn.MSELoss(reduction='sum')
+    elif isinstance(model, MLmodelSVM):  # regression model
+        loss_func = svmLoss(reduction='sum')
     # initialize evaluation mode
     model.eval()
+    acc = []  # test only
     # local evaluation, batch-wise
     for batch_id, (inputs, labels) in enumerate(fdl):
         client = inputs.location  # training location (i.e.,the client) recorded by Syft
@@ -171,7 +177,6 @@ def global_test(model, n_clients, cm_map, fdl):
         model.send(client)
         # inference
         y_hat = model(inputs)
-
         # loss
         loss = loss_func(y_hat, labels)
         test_sum_loss_vec[model_id] += loss.get().item()
@@ -232,6 +237,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     # 3. Futile counters - progression (i,e, work time) in vain caused by local crashes
     client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
     # 4. best loss (global)
+    best_rd = -1
     best_loss = float('inf')
     best_model = None
 
@@ -343,7 +349,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     round_trace, make_trace, pick_trace, crash_trace, None,
                     client_timers, client_futile_timers, global_timer,
-                    best_rd, best_loss)
+                    best_rd, best_loss, log_loss_traces=False)
 
     return best_model, best_rd, best_loss
 

@@ -8,6 +8,7 @@ import sys
 import os
 import random
 import numpy as np
+import torch
 import syft as sy
 import matplotlib.pyplot as plt
 from sklearn import datasets
@@ -78,7 +79,8 @@ def inspect_model(model):
 
 def log_stats(f_name, env_cfg, task_cfg, detail_env,
               epoch_train_trace, epoch_test_trace, round_trace, make_trace, pick_trace, crash_trace, deprecate_trace,
-              client_timers, client_futile_timers, global_timer, best_rd, best_loss, extra_args=None):
+              client_timers, client_futile_timers, global_timer, best_rd, best_loss,
+              extra_args=None, log_loss_traces=True):
     """
     Save experiment results into a log file
     :param f_name: log file name
@@ -95,6 +97,7 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
     :param best_rd: round index at which best model is achieved
     :param best_loss: best model's global loss
     :param extra_args: extra arguments, for extended FL
+    :param log_loss_traces: log the traces of training/test loss if True
     :return:
     """
     with open(f_name, 'a+') as f:
@@ -106,9 +109,10 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
         futile_pcts = np.array(client_futile_timers) / np.array(client_timers)
         print('Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
         print('Total time consumption:', global_timer)
-        print('> Loss traces')
-        print('Client train trace:', epoch_train_trace)
-        print('Client test trace:', epoch_test_trace)
+        if log_loss_traces:
+            print('> Loss traces')
+            print('Client train trace:', epoch_train_trace)
+            print('Client test trace:', epoch_test_trace)
         print('Round trace:', round_trace)
         print('> Pick&crash traces')
         print('Make trace:', make_trace)
@@ -171,13 +175,19 @@ def show_round_trace(trace, plotting=False, title_='XX'):
         plt.show()
 
 
-def normalize(data):
+def normalize(data, expt=None):
     """
     Normalize data
     :param data: data to normalize (in np.array)
+    :param expt: a list of col(s) to keep original value
     :return: normalized data
     """
-    return (data - data.min(axis=0)) / (data.max(axis=0) - data.min(axis=0))
+    if not expt:
+        return (data - data.min(axis=0)) / (data.max(axis=0) - data.min(axis=0))
+    else:
+        tmp = (data - data.min(axis=0)) / (data.max(axis=0) - data.min(axis=0))  # norm all cols
+        tmp[:, expt] = data[:, expt]  # roll these cols back
+        return tmp
 
 
 def list_shuffle(l):
@@ -186,7 +196,7 @@ def list_shuffle(l):
     :param l: the list
     :return: shuffled list
     """
-    return random.sample(l,len(l))
+    return random.sample(l, len(l))
 
 
 def filter_matrix_symb(mat, col, value):
@@ -247,8 +257,6 @@ def fetch_KddCup99_10pct_tcpdump(return_X_y=False):
     # filter out extreme values
     tcp_data_mat = filter_matrix_value(tcp_data_mat, 4, [0, 3e4])  # src_bytes
     tcp_data_mat = filter_matrix_value(tcp_data_mat, 5, [0, 3e4])  # dst_bytes
-    # filter out useless features
-    tcp_data_mat = filter_useless_cols(tcp_data_mat)  # remove features whose stdev = 0
 
     # filter out symbolic features
     mask = list(range(tcp_data_mat.shape[1]))
@@ -256,6 +264,9 @@ def fetch_KddCup99_10pct_tcpdump(return_X_y=False):
     mask.remove(2)  # symbolic field: service (e.g., http)
     mask.remove(3)  # symbolic field: flag (e.g., SF)
     tcp_data_mat = tcp_data_mat[:,mask]
+
+    # filter out useless features
+    tcp_data_mat = filter_useless_cols(tcp_data_mat)  # remove features whose stdev = 0
 
     # binarize labels, -1 normal, +1 abnormal
     labels = []
@@ -266,7 +277,7 @@ def fetch_KddCup99_10pct_tcpdump(return_X_y=False):
             labels.append(1)
 
     # replace the label col
-    tcp_data_mat = np.concatenate((tcp_data_mat[:, :-1].astype('int'), np.reshape(labels, (-1, 1))), axis=1)
+    tcp_data_mat = np.concatenate((tcp_data_mat[:, :-1].astype('float'), np.reshape(labels, (-1, 1))), axis=1)
 
     if return_X_y:
         return tcp_data_mat[:, :-1], tcp_data_mat[:, -1]
@@ -373,12 +384,19 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
     # split data and dispatch
     for i in range(env_cfg.n_clients):
         # prepare client data, train and test separately
+        # Note: repeated tests show that barely slicing results in copying the computation graph and the entire
+        # source data into n_clients pieces when sy.BaseDataset.send() is invoked, incurring excessive memory usage
+        # Therefore, we use tensor.clone().requires_grad_(False) to avoid that.
         client_train_data.append(
-            sy.BaseDataset(data_train_x[split_points_train[i]: split_points_train[i+1]],
-                           data_train_y[split_points_train[i]: split_points_train[i+1]]).send(clients[i]))
+            sy.BaseDataset(data_train_x[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
+                           data_train_y[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False)))
         client_test_data.append(
-            sy.BaseDataset(data_test_x[split_points_test[i]: split_points_test[i+1]],
-                           data_test_y[split_points_test[i]: split_points_test[i+1]]).send(clients[i]))
+            sy.BaseDataset(data_test_x[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False),
+                           data_test_y[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False)))
+
+        # allocate the BaseDataset to clients
+        client_train_data[i].send(clients[i])
+        client_test_data[i].send(clients[i])
 
     # pseudo distributed data sets
     fed_data_train = sy.FederatedDataset(client_train_data)
@@ -387,3 +405,15 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
     return fed_data_train, fed_data_test, client_shards_sizes
 
 
+def compute_accuracy_SVM(y, y_hat):
+    """
+    Compute Accuracy = (TP+TN)/(TP+TN+FP+FN)
+    :param y: labels
+    :param y_hat: model decisions
+    :return: acc
+    """
+    assert len(y) == len(y_hat)
+    acc = 0.0
+    for res in y*y_hat:
+        acc += 1 if res > 0 else 0
+    return acc/len(y)

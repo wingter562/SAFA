@@ -14,7 +14,7 @@ import random
 import numpy as np
 import syft as sy
 import matplotlib.pyplot as plt
-from learning_tasks import MLmodelReg
+from learning_tasks import MLmodelReg, svmLoss, MLmodelSVM
 import utils
 
 
@@ -83,6 +83,8 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
     # judge model type
     if task_cfg.loss == 'mse':  # regression model
         loss_func = nn.MSELoss(reduction='mean')  # cannot back-propagate with 'reduction=sum'
+    elif task_cfg.loss == 'svmLoss':  # SVM task
+        loss_func = svmLoss(reduction='mean')  # self-defined loss, have to use default reduction 'mean'
 
     # one optimizer for each model (re-instantiate optimizers to clear any possible momentum
     optimizers = []
@@ -150,6 +152,8 @@ def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
     # judge model type
     if isinstance(models[0], MLmodelReg):  # regression model
         loss_func = nn.MSELoss(reduction='sum')
+    elif isinstance(models[0], MLmodelSVM):  # regression model
+        loss_func = svmLoss(reduction='sum')
     # initialize evaluation mode
     for m in range(n_models):
         models[m].eval()
@@ -189,6 +193,8 @@ def global_test(model, n_clients, cm_map, fdl):
     # judge model type
     if isinstance(model, MLmodelReg):  # regression model
         loss_func = nn.MSELoss(reduction='sum')
+    elif isinstance(model, MLmodelSVM):  # regression model
+        loss_func = svmLoss(reduction='sum')
     # initialize evaluation mode
     model.eval()
     # local evaluation, batch-wise
@@ -325,7 +331,6 @@ def safa_aggregate(models, local_shards_sizes, data_size):
     return global_model
 
 
-# TODO: to test
 def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
                 clients_perf_vec, clients_crash_prob_vec, crash_trace, max_round_interval, lag_t=1):
     """
@@ -368,6 +373,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     picked_ids = []
     client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
     # 4. best loss (global)
+    best_rd = -1
     best_loss = float('inf')
     best_model = None
 
@@ -502,7 +508,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     round_trace, make_trace, pick_trace, crash_trace, deprecated_trace,
                     client_timers, client_futile_timers, global_timer,
-                    best_rd, best_loss, extra_args={'lag_tolerance': lag_t})
+                    best_rd, best_loss, extra_args={'lag_tolerance': lag_t}, log_loss_traces=False)
 
     return best_model, best_rd, best_loss
 

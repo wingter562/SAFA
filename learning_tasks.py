@@ -40,7 +40,7 @@ class MLmodelSVM(torch.nn.Module):
         # # init weights
         # torch.nn.init.zeros_(self.linear.weight)
         # torch.nn.init.zeros_(self.linear.bias)
-        self.w = torch.nn.Parameter(torch.tensor([0., 1.0, -1.]), requires_grad=True)
+        self.w = torch.nn.Parameter(torch.zeros(in_features), requires_grad=True)
         self.b = torch.nn.Parameter(torch.zeros(1), requires_grad=True)
 
     def get_w(self):
@@ -50,8 +50,8 @@ class MLmodelSVM(torch.nn.Module):
         return self.b
 
     def forward(self, x):
-        y_hat = torch.dot(self.w, x) - self.b  # y_pred = w * x - b
-        return y_hat
+        y_hat = torch.mv(x, self.w) - self.b  # y_pred = w * x - b
+        return y_hat.reshape(-1, 1)
 
 
 class svmLoss(torch.nn.Module):
@@ -72,18 +72,16 @@ class svmLoss(torch.nn.Module):
         :param y: labels as a tensor
         :return: loss
         """
-        batch_size = y.shape[0]
         tmp = 1 - (y * y_hat)
-        # sample-wise max
-        zeros_ = torch.zeros((batch_size, 1))
-        tmp = torch.cat((zeros_, tmp.reshape(-1, 1)), dim=1)  # zeros attached as a column
-        sample_losses = torch.max(tmp, dim=1)[0]  # torch.max's return also contains indices
-        sample_losses = sample_losses ** 2
-
+        # sample-wise max, (x + |x|)/2 = max(x, 0)
+        abs_tmp = torch.sqrt(tmp**2).detach()
+        tmp += abs_tmp  # differentiable abs
+        tmp /= 2
+        tmp = tmp ** 2
         if self.reduction == 'sum':
-            return torch.sum(sample_losses)
+            return torch.sum(tmp)
         elif self.reduction == 'mean':
-            return torch.mean(sample_losses)
+            return torch.mean(tmp)
         else:
             print('E> Wrong reduction method specified')
 
