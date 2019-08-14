@@ -7,6 +7,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import copy
 import sys
 import os
@@ -14,7 +15,7 @@ import random
 import numpy as np
 import syft as sy
 import matplotlib.pyplot as plt
-from learning_tasks import MLmodelReg, svmLoss, MLmodelSVM
+from learning_tasks import MLmodelReg, svmLoss, MLmodelSVM, MLmodelCNN
 import utils
 
 
@@ -80,11 +81,13 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
     for m in range(n_models):
         models[m].train()
 
-    # judge model type
-    if task_cfg.loss == 'mse':  # regression model
+    # Define loss based on task
+    if task_cfg.loss == 'mse':  # regression task
         loss_func = nn.MSELoss(reduction='mean')  # cannot back-propagate with 'reduction=sum'
     elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='mean')  # self-defined loss, have to use default reduction 'mean'
+    elif task_cfg.loss == 'nllLoss':  # CNN mnist task
+        loss_func = F.nll_loss(reduction='mean')
 
     # one optimizer for each model (re-instantiate optimizers to clear any possible momentum
     optimizers = []
@@ -134,10 +137,11 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
     return client_train_loss_vec
 
 
-def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
+def local_test(models, task_cfg, picked_ids, n_models, cm_map, fdl, last_loss_rep):
     """
     Evaluate client models locally and return a list of loss/error
     :param models: a list of model prototypes corresponding to clients
+    :param task_cfg: task configurations
     :param picked_ids: selected client indices for local training
     :param n_models: # of models, i.e., clients
     :param cm_map: the client-model map, as a dict
@@ -149,11 +153,14 @@ def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
     client_test_loss_vec = last_loss_rep
     for id in picked_ids:
         client_test_loss_vec[id] = 0.0
-    # judge model type
-    if isinstance(models[0], MLmodelReg):  # regression model
+    # Define loss based on task
+    if task_cfg.loss == 'mse':  # regression task
         loss_func = nn.MSELoss(reduction='sum')
-    elif isinstance(models[0], MLmodelSVM):  # regression model
+    elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='sum')
+    elif task_cfg.loss == 'nllLoss':  # CNN mnist task
+        loss_func = F.nll_loss(reduction='sum')
+
     # initialize evaluation mode
     for m in range(n_models):
         models[m].eval()
@@ -180,21 +187,25 @@ def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
     return client_test_loss_vec
 
 
-def global_test(model, n_clients, cm_map, fdl):
+def global_test(model, task_cfg, n_clients, cm_map, fdl):
     """
     Testing the aggregated global model by averaging its error on each local data
     :param model: the global model
+    :param task_cfg: task configurations
     :param n_clients: # of models, i.e., clients
     :param cm_map: the client-model map, as a dict
     :param fdl: FederatedDataLoader
     :return: global model's loss on each client, as a vector
     """
     test_sum_loss_vec = [0 for i in range(n_clients)]
-    # judge model type
-    if isinstance(model, MLmodelReg):  # regression model
+    # Define loss based on task
+    if task_cfg.loss == 'mse':  # regression task
         loss_func = nn.MSELoss(reduction='sum')
-    elif isinstance(model, MLmodelSVM):  # regression model
+    elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='sum')
+    elif task_cfg.loss == 'nllLoss':  # CNN mnist task
+        loss_func = F.nll_loss(reduction='sum')
+
     # initialize evaluation mode
     model.eval()
     # local evaluation, batch-wise
@@ -499,7 +510,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     print('\n> Experiment stats')
     print('> Clients run time:', client_timers)
     print('> Clients futile run time:', client_futile_timers)
-    futile_pcts = np.array(client_futile_timers) / np.array(client_timers)
+    futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
     print('> Total time consumption:', global_timer)
 

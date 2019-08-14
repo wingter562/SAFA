@@ -5,14 +5,15 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
+from torchvision import datasets, transforms
 import copy
 import sys
 import os
 import random
 import numpy as np
 import syft as sy
-import matplotlib.pyplot as plt
 from sklearn import datasets
 from sklearn.svm import SVC
 from learning_tasks import MLmodelReg
@@ -31,7 +32,7 @@ class EnvSettings:
         n_epochs: # of local epochs (identical for each client)
         batch_size: size of a local batch (identical for each client)
         train_pct: training data percentage
-        subset_pct: percentage of clients picked in each round
+        pick_pct: percentage of clients picked in each round
         data_dist: local data size distribution, valid options include:
             ('E',None): equal-size partition, local size = total_size / n_clients
             ('N',rlt_sigma): partition with local sizes following normal distribution, mu = total_size/n_clients,
@@ -47,7 +48,7 @@ class EnvSettings:
         keep_best: keep so-far best global model if True, otherwise update anyway after aggregation
         dev: running device
     """
-    def __init__(self, n_clients=3, n_rounds=3, n_epochs=1, batch_size=1, train_pct=0.7, subset_pct=1.0,
+    def __init__(self, n_clients=3, n_rounds=3, n_epochs=1, batch_size=1, train_pct=0.7, pick_pct=1.0,
                  data_dist=None, perf_dist=None, crash_dist=None, keep_best=False, dev='cpu'):
         self.mode = None
         self.n_clients = n_clients
@@ -56,7 +57,7 @@ class EnvSettings:
         self.batch_size = batch_size  # batch_size = -1 means full local data set as a mini-batch
         self.train_pct = train_pct
         self.test_pct = 1 - self.train_pct
-        self.subset_pct = subset_pct
+        self.pick_pct = pick_pct
 
         # client and data settings
         self.data_dist = data_dist  # data (size) distribution
@@ -212,80 +213,79 @@ def generate_crash_trace(env_cfg, clients_crash_prob_vec):
     return crash_trace, progress_trace
 
 
-# test area
-# X, y = datasets.fetch_kddcup99(subset=None, data_home='data/', shuffle=False, percent10=True, return_X_y=True)
-# y = np.reshape(y,(-1 ,1))
-# xy = np.concatenate((X, y), axis=1)
-# print(xy)
-# n_xy = utils.filter_matrix(xy, -1, b'normal.')
-# print('total=', len(xy), 'normal=', len(n_xy))  # overall data view
-#
-# # tcp data
-# tcp_xy = utils.filter_matrix(xy, 1, b'tcp')
-# tcp_n_xy = utils.filter_matrix(tcp_xy, -1, b'normal.')
-# print(tcp_xy)
-# print(type(tcp_xy[0][0]))
-# print('total_tcp=', len(tcp_xy), 'normal_tcp=', len(tcp_n_xy))  # tcp data view
-
-# xy = utils.fetch_KddCup99_10pct_tcpdump(return_X_y=False)
-# exit(0)
-# xy = utils.normalize(xy, expt=-1)  # SVM can't converge with normalization
-# print(xy)
-# print('total=', len(xy))
-# x = xy[:,0:-1]
-# y = xy[:, -1]
-# clf = SVC(kernel='linear')
-# clf.fit(x, y)
-# decs = clf.decision_function(x)
-# neg = 0
-# precision = 0
-# for k in range(len(y)):
-#     print(decs[k], y[k])
-# save_KddCup99_tcpdump_tcp_tofile('data/kddcup99_tcp.csv')
-# exit(0)
-
-if __name__ == '__main__':
+def main():
     # initialization
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
-    ''' Boston housing regression settings'''
+    ''' Boston housing regression settings '''
     # env_cfg = EnvSettings(n_clients=5, n_rounds=20, n_epochs=2, batch_size=1, train_pct=0.7, subset_pct=0.4,
     #                       data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
     #                       dev='cpu', keep_best=False)
     # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
     #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-2)
-    ''' KddCup99 tcpdump SVM classification settings'''
-    env_cfg = EnvSettings(n_clients=200, n_rounds=20, n_epochs=3, batch_size=100, train_pct=0.7, subset_pct=0.5,
-                          data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
+    ''' KddCup99 tcpdump SVM classification settings '''
+    # env_cfg = EnvSettings(n_clients=200, n_rounds=30, n_epochs=3, batch_size=100, train_pct=0.7, pick_pct=0.5,
+    #                       data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
+    #                       dev='cpu', keep_best=False)
+    # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
+    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2)
+    ''' MNIST digits classification task settings '''
+    env_cfg = EnvSettings(n_clients=50, n_rounds=20, n_epochs=3, batch_size=64, train_pct=6.0/7.0, pick_pct=1.0,
+                          data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.0),
                           dev='cpu', keep_best=False)
-    task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
-                            in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2)  # for KddCup99 tcpdump
+    task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
+                            in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-2)
 
-    # kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
+    # data loader args, for cuda only
+    kwargs = {'num_workers': 1, 'pin_memory': True} if env_cfg.device == 'gpu' and torch.cuda.is_available() else {}
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
 
     # create clients and client-model-mapping
     clients = []
     cm_map = {}
     for i in range(env_cfg.n_clients):
-        clients.append(sy.VirtualWorker(hook, id='client_'+str(i)))
-        cm_map['client_'+str(i)] = i  # client i with model i
+        clients.append(sy.VirtualWorker(hook, id='client_' + str(i)))
+        cm_map['client_' + str(i)] = i  # client i with model i
 
     # load data
     if task_cfg.dataset == 'Boston':
         data = np.loadtxt(task_cfg.path, delimiter=',', skiprows=1)
         data = utils.normalize(data)
+        data_merged = True
     elif task_cfg.dataset == 'tcpdump99':
         data = np.loadtxt(task_cfg.path, delimiter=',', skiprows=1)
         data = utils.normalize(data, expt=-1)  # normalize features but not labels (+1/-1 for SVM)
+        data_merged = True
+    elif task_cfg.dataset == 'mnist':
+        # ref: https://github.com/pytorch/examples/blob/master/mnist/main.py
+        mnist_train = datasets.MNIST('data/mnist/', train=True, download=True,
+                                     transform=transforms.Compose([
+                                         transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]))
+        mnist_test = datasets.MNIST('data/mnist/', train=False, download=True,
+                                    transform=transforms.Compose([
+                                        transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]))
+        data_train_x = mnist_train.data
+        data_train_y = mnist_train.targets
+        data_test_x = mnist_train.data
+        data_test_y = mnist_train.targets
 
-    data_size = len(data)
-    train_data_size = int(data_size * env_cfg.train_pct)
-    test_data_size = data_size - train_data_size
-    data = torch.tensor(data).float()
-    data_train_x = data[0:train_data_size, 0:task_cfg.in_dim]  # training data, x
-    data_train_y = data[0:train_data_size, task_cfg.out_dim*-1:].reshape(-1, task_cfg.out_dim)  # training data , y
-    data_test_x = data[train_data_size:, 0:task_cfg.in_dim]  # test data, x
-    data_test_y = data[train_data_size:, task_cfg.out_dim*-1:].reshape(-1, task_cfg.out_dim)  # test data, x
+        train_data_size = len(mnist_train)
+        test_data_size = len(mnist_test)
+        data_size = train_data_size + test_data_size
+        data_merged = False
+    else:
+        print('E> Invalid dataset specified')
+        exit(-1)
+
+    # partition into train/test set, for Boston and Tcpdump data
+    if data_merged:
+        data_size = len(data)
+        train_data_size = int(data_size * env_cfg.train_pct)
+        test_data_size = data_size - train_data_size
+        data = torch.tensor(data).float()
+        data_train_x = data[0:train_data_size, 0:task_cfg.in_dim]  # training data, x
+        data_train_y = data[0:train_data_size, task_cfg.out_dim * -1:].reshape(-1, task_cfg.out_dim)  # training data, y
+        data_test_x = data[train_data_size:, 0:task_cfg.in_dim]  # test data following, x
+        data_test_y = data[train_data_size:, task_cfg.out_dim * -1:].reshape(-1, task_cfg.out_dim)  # test data, x
 
     fed_data_train, fed_data_test, client_shard_sizes = utils.get_FL_datasets(data_train_x, data_train_y,
                                                                               data_test_x, data_test_y,
@@ -310,21 +310,26 @@ if __name__ == '__main__':
     crash_trace, progress_trace = generate_crash_trace(env_cfg, clients_crash_prob_vec)
 
     # specify learning task
-    # models = init_models(env_cfg, task_cfg)
-    # print('> Launching FL...')
-    # # run FL with FedAvg
-    # env_cfg.mode = 'Primal FedAvg'
-    # best_model, best_rd, final_loss = primal_FedAvg.\
-    #     run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
-    #            clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
+    models = init_models(env_cfg, task_cfg)
+    print('> Launching FL...')
+    # run FL with FedAvg
+    env_cfg.mode = 'Primal FedAvg'
+    best_model, best_rd, final_loss = primal_FedAvg. \
+        run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
+               clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
 
     # reinitialize
     models = init_models(env_cfg, task_cfg)
     print('> Launching SAFA-FL...')
     # run FL with SAFA
     env_cfg.mode = 'Semi-Async. FedAvg'
-    best_model, best_rd, final_loss = semiAysnc_FedAvg.\
+    best_model, best_rd, final_loss = semiAysnc_FedAvg. \
         run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test,
                     client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, max_round_interval,
                     lag_t=2)
 
+
+# test area
+
+if __name__ == '__main__':
+    main()

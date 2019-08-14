@@ -4,27 +4,29 @@
 # @Date    : 2019-7-30
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 ''' Define machine learning models '''
-class MLmodelReg(torch.nn.Module):
+class MLmodelReg(nn.Module):
     """
     Linear regression model implemented as a single-layer NN
     """
     def __init__(self, in_features, out_features):
         super(MLmodelReg, self).__init__()
-        self.linear = torch.nn.Linear(in_features, out_features)  # in = independent vars, out = dependent vars
+        self.linear = nn.Linear(in_features, out_features)  # in = independent vars, out = dependent vars
 
         # init weights
-        torch.nn.init.zeros_(self.linear.weight)
-        torch.nn.init.zeros_(self.linear.bias)
+        nn.init.zeros_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
 
     def forward(self, x):
         y_pred = self.linear(x)  # y_pred = w * x - b
         return y_pred
 
 
-class MLmodelSVM(torch.nn.Module):
+class MLmodelSVM(nn.Module):
     """
     Linear Support Vector Machine implemented as a single-layer NN plus regularization
     hyperplane: wx - b = 0
@@ -40,8 +42,8 @@ class MLmodelSVM(torch.nn.Module):
         # # init weights
         # torch.nn.init.zeros_(self.linear.weight)
         # torch.nn.init.zeros_(self.linear.bias)
-        self.w = torch.nn.Parameter(torch.zeros(in_features), requires_grad=True)
-        self.b = torch.nn.Parameter(torch.zeros(1), requires_grad=True)
+        self.w = nn.Parameter(torch.zeros(in_features), requires_grad=True)
+        self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
     def get_w(self):
         return self.w
@@ -54,7 +56,7 @@ class MLmodelSVM(torch.nn.Module):
         return y_hat.reshape(-1, 1)
 
 
-class svmLoss(torch.nn.Module):
+class svmLoss(nn.Module):
     """
     Loss function class for linear SVM
         reduction: reduction method
@@ -86,6 +88,25 @@ class svmLoss(torch.nn.Module):
             print('E> Wrong reduction method specified')
 
     # no need to override backward as L2-norm svm loss is differentiable
+
+
+class MLmodelCNN(nn.Module):
+    def __init__(self):
+        super(MLmodelCNN, self).__init__()
+        self.conv1 = nn.Conv2d(1, 20, 5, 1)  # 20 [(1*)5*5] conv. kernels
+        self.conv2 = nn.Conv2d(20, 50, 5, 1)  # 50 [(20*)5*5] conv. kernels
+        self.fc1 = nn.Linear(4 * 4 * 50, 500)  # linear 1
+        self.fc2 = nn.Linear(500, 10)  # linear 2
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.max_pool2d(x, 2, 2)
+        x = F.relu(self.conv2(x))
+        x = F.max_pool2d(x, 2, 2)
+        x = x.view(-1, 4 * 4 * 50)  # flatten
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return F.log_softmax(x, dim=1)
 
 
 @ DeprecationWarning  # use svmLoss instead

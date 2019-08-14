@@ -1,0 +1,2 @@
+MNIST fetched using torchvision.datasets.MNIST (https://pytorch.org/docs/master/torchvision/datasets.html?highlight=mnist#torchvision.datasets.MNIST)
+Downloadable from http://yann.lecun.com/exdb/mnist/

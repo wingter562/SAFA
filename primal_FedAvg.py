@@ -9,6 +9,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import copy
 import sys
 import os
@@ -16,7 +17,7 @@ import random
 import numpy as np
 import syft as sy
 import matplotlib.pyplot as plt
-from learning_tasks import MLmodelReg
+from learning_tasks import MLmodelReg, MLmodelCNN
 from learning_tasks import MLmodelSVM
 from learning_tasks import svmLoss
 import utils
@@ -55,6 +56,8 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
         loss_func = nn.MSELoss(reduction='mean')  # cannot back-propagate with 'reduction=sum'
     elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='mean')  # self-defined loss, have to use default reduction 'mean'
+    elif task_cfg.loss == 'nllLoss':  # CNN mnist task
+        loss_func = F.nll_loss(reduction='mean')
 
     # one optimizer for each model (re-instantiate optimizers to clear any possible momentum
     optimizers = []
@@ -105,10 +108,11 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
     return client_train_loss_vec
 
 
-def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
+def local_test(models, task_cfg, picked_ids, n_models, cm_map, fdl, last_loss_rep):
     """
     Evaluate client models locally and return a list of loss/error
     :param models: a list of model prototypes corresponding to clients
+    :param task_cfg: task configurations
     :param picked_ids: selected client indices for local training
     :param n_models: # of models, i.e., clients
     :param cm_map: the client-model map, as a dict
@@ -120,11 +124,14 @@ def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
     client_test_loss_vec = last_loss_rep
     for id in picked_ids:
         client_test_loss_vec[id] = 0.0
-    # judge model type
-    if isinstance(models[0], MLmodelReg):  # regression model
+    # Define loss based on task
+    if task_cfg.loss == 'mse':  # regression task
         loss_func = nn.MSELoss(reduction='sum')
-    elif isinstance(models[0], MLmodelSVM):  # regression model
+    elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='sum')
+    elif task_cfg.loss == 'nllLoss':  # CNN mnist task
+        loss_func = F.nll_loss(reduction='sum')
+
     # initialize evaluation mode
     for m in range(n_models):
         models[m].eval()
@@ -151,21 +158,25 @@ def local_test(models, picked_ids, n_models, cm_map, fdl, last_loss_rep):
     return client_test_loss_vec
 
 
-def global_test(model, n_clients, cm_map, fdl):
+def global_test(model, task_cfg, n_clients, cm_map, fdl):
     """
     Testing the aggregated global model by averaging its error on each local data
     :param model: the global model
+    :param task_cfg: task configuration
     :param n_clients: # of models, i.e., clients
     :param cm_map: the client-model map, as a dict
     :param fdl: FederatedDataLoader
     :return: global model's loss on each client, as a vector
     """
-    test_sum_loss_vec = [0 for i in range(n_clients)]
-    # judge model type
-    if isinstance(model, MLmodelReg):  # regression model
+    test_sum_loss_vec = [0 for _ in range(n_clients)]
+    # Define loss based on task
+    if task_cfg.loss == 'mse':  # regression task
         loss_func = nn.MSELoss(reduction='sum')
-    elif isinstance(model, MLmodelSVM):  # regression model
+    elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='sum')
+    elif task_cfg.loss == 'nllLoss':  # CNN mnist task
+        loss_func = F.nll_loss(reduction='sum')
+
     # initialize evaluation mode
     model.eval()
     acc = []  # test only
@@ -279,7 +290,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
                   np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
 
             # local test reports
-            reporting_test_loss_vec = local_test(models, make_ids, env_cfg.n_clients, cm_map, fed_loader_test,
+            reporting_test_loss_vec = local_test(models, task_cfg, make_ids, env_cfg.n_clients, cm_map, fed_loader_test,
                                                  reporting_test_loss_vec)
             # add to trace
             epoch_test_trace.append(
@@ -292,7 +303,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
         global_model = aggregate(models, client_shard_sizes, data_size)
 
         # Reporting phase: distributed test of the global model
-        post_aggre_loss_vec = global_test(global_model, env_cfg.n_clients, cm_map, fed_loader_test)
+        post_aggre_loss_vec = global_test(global_model, task_cfg, env_cfg.n_clients, cm_map, fed_loader_test)
         print('>   post-aggregation loss reports  = ',
               np.array(post_aggre_loss_vec) / ((np.array(client_shard_sizes)) * env_cfg.test_pct))
         # overall loss, i.e., objective (1) in McMahan's paper
@@ -340,7 +351,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     print('\n> Experiment stats')
     print('> Clients run time:', client_timers)
     print('> Clients futile run time:', client_futile_timers)
-    futile_pcts = np.array(client_futile_timers) / np.array(client_timers)
+    futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
     print('> Total time consumption:', global_timer)
 
