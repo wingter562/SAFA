@@ -12,6 +12,7 @@ import torch
 import syft as sy
 import matplotlib.pyplot as plt
 from sklearn import datasets
+import fedGpuSupport as fedGS
 
 
 def set_print_device(dev, f_handle=None):
@@ -39,7 +40,7 @@ def show_settings(env_cfg, task_cfg, detail=False, detail_info=None):
     """
     print('> Env settings')
     print('Mode: %s' % env_cfg.mode)
-    print('n_clients=%d, fraction=%.2f' % (env_cfg.n_clients, env_cfg.subset_pct))
+    print('n_clients=%d, fraction=%.2f' % (env_cfg.n_clients, env_cfg.pick_pct))
     print('rounds=%d, n_local_epochs=%d, batch_size=%d' % (env_cfg.n_rounds, env_cfg.n_epochs, env_cfg.batch_size))
     print('data_dist=%s, perf_dist=%s, crash_dist=%s' % (env_cfg.data_dist, env_cfg.perf_dist, env_cfg.crash_dist))
     if detail:
@@ -170,7 +171,7 @@ def show_round_trace(trace, plotting=False, title_='XX'):
     if plotting:
         plt.plot(list(range(len(trace))), trace)
         plt.title(title_)
-        plt.xlabel('round #')
+        plt.xlabel('federated round #')
         plt.ylabel('Global loss')
         plt.show()
 
@@ -296,6 +297,11 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
     :param clients: client objects
     :return: a list of client-wise training data, a list of client-wise test data, and a list of sizes of shards
     """
+    dev = env_cfg.device
+    # device
+    data_train_x, data_train_y = data_train_x.to(dev), data_train_y.to(dev)
+    data_test_x, data_test_y = data_test_x.to(dev), data_test_y.to(dev)
+    # metas
     train_size = len(data_train_x)
     test_size = len(data_test_x)
     data_size = train_size + test_size
@@ -332,7 +338,7 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
             # validity check
             for i in range(env_cfg.n_clients):
                 quota = split_points_train[i+1] - split_points_train[i] + split_points_test[i+1] - split_points_test[i]
-                if quota < 20:  # check each shard size
+                if quota < max(20, env_cfg.batch_size):  # check each shard size
                     rerand = True  # can't be too small
                     break
                 else:
@@ -352,7 +358,7 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
             client_shards_sizes = client_shards_sizes * data_size / client_shards_sizes.sum()
             # validity check
             for s in client_shards_sizes:
-                if s < 20:
+                if s < max(20, env_cfg.batch_size):
                     rerand = True
                     break
         # now compose train and test partitions separately
@@ -382,25 +388,41 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
         exit(0)
 
     # split data and dispatch
-    for i in range(env_cfg.n_clients):
-        # prepare client data, train and test separately
-        # Note: repeated tests show that barely slicing results in copying the computation graph and the entire
-        # source data into n_clients pieces when sy.BaseDataset.send() is invoked, incurring excessive memory usage
-        # Therefore, we use tensor.clone().requires_grad_(False) to avoid that.
-        client_train_data.append(
-            sy.BaseDataset(data_train_x[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
-                           data_train_y[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False)))
-        client_test_data.append(
-            sy.BaseDataset(data_test_x[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False),
-                           data_test_y[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False)))
-
-        # allocate the BaseDataset to clients
-        client_train_data[i].send(clients[i])
-        client_test_data[i].send(clients[i])
-
-    # pseudo distributed data sets
-    fed_data_train = sy.FederatedDataset(client_train_data)
-    fed_data_test = sy.FederatedDataset(client_test_data)
+    # for PySyft cpu runtime:
+    if env_cfg.device.type == 'cpu' or env_cfg.device.type == 'cuda':
+        for i in range(env_cfg.n_clients):
+            # prepare client data, train and test separately
+            # Note: repeated tests show that barely slicing results in copying the computation graph and the entire
+            # source data into n_clients pieces when sy.BaseDataset.send() is invoked, incurring excessive memory usage
+            # Therefore, we use tensor.clone().requires_grad_(False) to avoid that.
+            client_train_data.append(
+                sy.BaseDataset(data_train_x[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
+                               data_train_y[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False)))
+            client_test_data.append(
+                sy.BaseDataset(data_test_x[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False),
+                               data_test_y[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False)))
+            # allocate the BaseDataset to clients
+            client_train_data[i].send(clients[i])
+            client_test_data[i].send(clients[i])
+        # pseudo distributed data sets
+        fed_data_train = sy.FederatedDataset(client_train_data)
+        fed_data_test = sy.FederatedDataset(client_test_data)
+    # for cuda-support federated data
+    else:
+        for i in range(env_cfg.n_clients):
+            client_train_data.append(
+                fedGS.GpuBaseDataset(
+                    data_train_x[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
+                    data_train_y[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
+                    clients[i]))
+            client_test_data.append(
+                fedGS.GpuBaseDataset(
+                    data_test_x[split_points_test[i]: split_points_test[i + 1]].clone().requires_grad_(False),
+                    data_test_y[split_points_test[i]: split_points_test[i + 1]].clone().requires_grad_(False),
+                    clients[i]))
+            # pseudo distributed data sets
+            fed_data_train = fedGS.GpuFedDataset(client_train_data)
+            fed_data_test = fedGS.GpuFedDataset(client_test_data)
 
     return fed_data_train, fed_data_test, client_shards_sizes
 

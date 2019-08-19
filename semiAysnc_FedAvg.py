@@ -7,7 +7,6 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 import copy
 import sys
 import os
@@ -66,6 +65,7 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
     :param verbose: display batch progress or not.
     :return: epoch training loss of each client, batch-summed
     """
+    dev = env_cfg.device
     if len(picked_ids) == 0:  # no training happens
         return last_loss_rep
     # extract settings
@@ -87,7 +87,7 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
     elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='mean')  # self-defined loss, have to use default reduction 'mean'
     elif task_cfg.loss == 'nllLoss':  # CNN mnist task
-        loss_func = F.nll_loss(reduction='mean')
+        loss_func = nn.NLLLoss()
 
     # one optimizer for each model (re-instantiate optimizers to clear any possible momentum
     optimizers = []
@@ -101,12 +101,12 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
 
     # begin an epoch of training
     for batch_id, (inputs, labels) in enumerate(fdl):
+        inputs, labels = inputs.to(dev), labels.to(dev)  # data to device
         client = inputs.location  # training location (i.e.,the client) recorded by Syft, an object
         model_id = cm_map[client.id]  # locate the right model index
         # neglect non-participants
         if model_id not in picked_ids:
             continue
-
         # mini-batch GD
         print('\n> Batch #', batch_id, 'on', inputs.location.id)
         print('>   model_id = ', model_id)
@@ -137,18 +137,19 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
     return client_train_loss_vec
 
 
-def local_test(models, task_cfg, picked_ids, n_models, cm_map, fdl, last_loss_rep):
+def local_test(models, picked_ids, task_cfg, env_cfg,  cm_map, fdl, last_loss_rep):
     """
     Evaluate client models locally and return a list of loss/error
     :param models: a list of model prototypes corresponding to clients
     :param task_cfg: task configurations
+    :param env_cfg: environment configurations
     :param picked_ids: selected client indices for local training
-    :param n_models: # of models, i.e., clients
     :param cm_map: the client-model map, as a dict
     :param fdl: an instance of FederatedDataLoader
     :param last_loss_rep: loss reports in last run
     :return: epoch test loss of each client, batch-summed
     """
+    dev = env_cfg.device
     # initialize loss report, keep loss tracks for idlers, clear those for participants
     client_test_loss_vec = last_loss_rep
     for id in picked_ids:
@@ -159,14 +160,18 @@ def local_test(models, task_cfg, picked_ids, n_models, cm_map, fdl, last_loss_re
     elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='sum')
     elif task_cfg.loss == 'nllLoss':  # CNN mnist task
-        loss_func = F.nll_loss(reduction='sum')
+        loss_func = nn.NLLLoss(reduction='sum')
+        is_cnn = True
 
     # initialize evaluation mode
-    for m in range(n_models):
+    for m in range(env_cfg.n_clients):
         models[m].eval()
     # local evaluation, batch-wise
+    acc = 0.0  # CNN only
+    count = 0.0  # CNN only
     with torch.no_grad():
         for batch_id, (inputs, labels) in enumerate(fdl):
+            inputs, labels = inputs.to(dev), labels.to(dev)  # data to device
             client = inputs.location  # training location (i.e.,the client) recorded by Syft
             model_id = cm_map[client.id]  # locate the right model index
             # neglect non-participants
@@ -177,51 +182,67 @@ def local_test(models, task_cfg, picked_ids, n_models, cm_map, fdl, last_loss_re
             model.send(client)
             # inference
             y_hat = model(inputs)
-
             # loss
             loss = loss_func(y_hat, labels)
             client_test_loss_vec[model_id] += loss.get().item()
 
             models[model_id] = model.get()
+            # for CNN only
+            if is_cnn:
+                pred = y_hat.argmax(dim=1, keepdim=True)
+                acc += pred.eq(labels.view_as(pred)).get().sum().item()
+                count += len(labels)
+
+    if is_cnn:
+        print('acc = ', acc / count)
 
     return client_test_loss_vec
 
 
-def global_test(model, task_cfg, n_clients, cm_map, fdl):
+def global_test(model, task_cfg, env_cfg, cm_map, fdl):
     """
     Testing the aggregated global model by averaging its error on each local data
     :param model: the global model
     :param task_cfg: task configurations
-    :param n_clients: # of models, i.e., clients
+    :param env_cfg: environment configurations
     :param cm_map: the client-model map, as a dict
     :param fdl: FederatedDataLoader
     :return: global model's loss on each client, as a vector
     """
-    test_sum_loss_vec = [0 for i in range(n_clients)]
+    dev = env_cfg.device
+    test_sum_loss_vec = [0 for i in range(env_cfg.n_clients)]
     # Define loss based on task
     if task_cfg.loss == 'mse':  # regression task
         loss_func = nn.MSELoss(reduction='sum')
     elif task_cfg.loss == 'svmLoss':  # SVM task
         loss_func = svmLoss(reduction='sum')
     elif task_cfg.loss == 'nllLoss':  # CNN mnist task
-        loss_func = F.nll_loss(reduction='sum')
+        loss_func = nn.NLLLoss(reduction='sum')
+        is_cnn = True
 
     # initialize evaluation mode
+    print('> global test')
     model.eval()
     # local evaluation, batch-wise
+    acc = 0.0  # CNN only
     for batch_id, (inputs, labels) in enumerate(fdl):
+        inputs, labels = inputs.to(dev), labels.to(dev)  # data to device
         client = inputs.location  # training location (i.e.,the client) recorded by Syft
         model_id = cm_map[client.id]
         # send model to data
         model.send(client)
         # inference
         y_hat = model(inputs)
-
         # loss
         loss = loss_func(y_hat, labels)
         test_sum_loss_vec[model_id] += loss.get().item()
 
         model.get()
+        if is_cnn:
+            pred = y_hat.argmax(dim=1, keepdim=True)  # only for test
+            acc += pred.eq(labels.view_as(pred)).get().sum().item()
+    if is_cnn:
+        print('acc = ', acc / 10000.0)
 
     return test_sum_loss_vec
 
@@ -397,7 +418,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
         picked_client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
         # randomly pick a specified fraction of clients to launch training
-        quota = int(env_cfg.n_clients * env_cfg.subset_pct)  # the quota
+        quota = int(env_cfg.n_clients * env_cfg.pick_pct)  # the quota
         # simulate device or network failure
         crash_ids = crash_trace[rd]
         make_ids = [c_id for c_id in range(env_cfg.n_clients) if c_id not in crash_ids]
@@ -434,7 +455,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
                   np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
 
             # local test reports
-            reporting_test_loss_vec = local_test(models, make_ids, env_cfg.n_clients, cm_map, fed_loader_test,
+            reporting_test_loss_vec = local_test(models, make_ids, task_cfg, env_cfg, cm_map, fed_loader_test,
                                                  reporting_test_loss_vec)
             # add to trace
             epoch_test_trace.append(
@@ -462,7 +483,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         print('\n> Versions updated:', versions)
 
         # Reporting phase: distributed test of the global model
-        post_aggre_loss_vec = global_test(global_model, env_cfg.n_clients, cm_map, fed_loader_test)
+        post_aggre_loss_vec = global_test(global_model, task_cfg, env_cfg, cm_map, fed_loader_test)
         print('>   post-aggregation loss reports  = ',
               np.array(post_aggre_loss_vec) / ((np.array(client_shard_sizes)) * env_cfg.test_pct))
         # overall loss, i.e., objective (1) in McMahan's paper

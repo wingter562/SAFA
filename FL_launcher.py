@@ -7,16 +7,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torchvision import datasets, transforms
+from torchvision import datasets as torch_datasets
+from torchvision import transforms
 import copy
 import sys
 import os
 import random
 import numpy as np
 import syft as sy
-from sklearn import datasets
+from sklearn import datasets as sk_datasets
 from sklearn.svm import SVC
-from learning_tasks import MLmodelReg
+import fedGpuSupport
+from learning_tasks import MLmodelReg, MLmodelCNN
 from learning_tasks import MLmodelSVM
 import utils
 import primal_FedAvg
@@ -32,6 +34,7 @@ class EnvSettings:
         n_epochs: # of local epochs (identical for each client)
         batch_size: size of a local batch (identical for each client)
         train_pct: training data percentage
+        sf: shuffle if True
         pick_pct: percentage of clients picked in each round
         data_dist: local data size distribution, valid options include:
             ('E',None): equal-size partition, local size = total_size / n_clients
@@ -48,8 +51,8 @@ class EnvSettings:
         keep_best: keep so-far best global model if True, otherwise update anyway after aggregation
         dev: running device
     """
-    def __init__(self, n_clients=3, n_rounds=3, n_epochs=1, batch_size=1, train_pct=0.7, pick_pct=1.0,
-                 data_dist=None, perf_dist=None, crash_dist=None, keep_best=False, dev='cpu'):
+    def __init__(self, n_clients=3, n_rounds=3, n_epochs=1, batch_size=1, train_pct=0.7, sf=False,
+                 pick_pct=1.0, data_dist=None, perf_dist=None, crash_dist=None, keep_best=False, dev='cpu'):
         self.mode = None
         self.n_clients = n_clients
         self.n_rounds = n_rounds
@@ -57,6 +60,7 @@ class EnvSettings:
         self.batch_size = batch_size  # batch_size = -1 means full local data set as a mini-batch
         self.train_pct = train_pct
         self.test_pct = 1 - self.train_pct
+        self.shuffle = sf
         self.pick_pct = pick_pct
 
         # client and data settings
@@ -84,8 +88,9 @@ class TaskSettings:
         optimizer: optimizer, 'SGD', 'Adam'
         loss: loss function to use: 'mse' for regression, 'svm_loss' for SVM,
         lr: learning rate
+        lr_decay: learning rate decay per round
     """
-    def __init__(self, task_type, dataset, path, in_dim, out_dim, optimizer='SGD', loss=None, lr=0.01):
+    def __init__(self, task_type, dataset, path, in_dim, out_dim, optimizer='SGD', loss=None, lr=0.01, lr_decay=1.0):
         self.task_type = task_type
         self.dataset = dataset
         self.path = path
@@ -94,6 +99,7 @@ class TaskSettings:
         self.optimizer = optimizer
         self.loss = loss
         self.lr = lr
+        self.lr_decay = lr_decay
 
 
 def save_KddCup99_tcpdump_tcp_tofile(fpath):
@@ -113,6 +119,36 @@ def save_KddCup99_tcpdump_tcp_tofile(fpath):
                       'dst_host_rerror_rate, dst_host_srv_rerror_rate, label')
 
 
+def init_syft_clients(nc, hook):
+    """
+    # Create clients and a client-index map
+    :param nc:  # of clients
+    :param hook:  Syft hook
+    :return: clients list, and a client-index map
+    """
+    clients = []
+    cm_map = {}
+    for i in range(nc):
+        clients.append(sy.VirtualWorker(hook, id='client_' + str(i)))
+        cm_map['client_' + str(i)] = i  # client i with model i
+    return clients, cm_map
+
+
+@DeprecationWarning  # deprecated in favor of Syft built-in Cuda support
+def init_cuda_clients(nc):
+    """
+    # Create clients and a client-index map
+    :param nc:  # of cuda clients
+    :return: clients list, and a client-index map
+    """
+    clients = []
+    cm_map = {}
+    for i in range(nc):
+        clients.append(fedGpuSupport.GpuClient(id='client_' + str(i)))
+        cm_map['client_' + str(i)] = i  # client i with model i
+    return clients, cm_map
+
+
 def init_models(env_cfg, task_cfg):
     """
     Initialize models as per the settings of FL and machine learning task
@@ -121,12 +157,20 @@ def init_models(env_cfg, task_cfg):
     :return: models
     """
     models = []
+    dev = env_cfg.device
+    # have to transiently set default tensor type to cuda.float, otherwise model.to(dev) fails on GPU
+    if dev.type == 'cuda':
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    # instantiate models, one per client
     for i in range(env_cfg.n_clients):
         if task_cfg.task_type == 'Reg':
-            models.append(MLmodelReg(in_features=task_cfg.in_dim, out_features=task_cfg.out_dim))
+            models.append(MLmodelReg(in_features=task_cfg.in_dim, out_features=task_cfg.out_dim).to(dev))
         elif task_cfg.task_type == 'SVM':
-            models.append(MLmodelSVM(in_features=task_cfg.in_dim))
+            models.append(MLmodelSVM(in_features=task_cfg.in_dim).to(dev))
+        elif task_cfg.task_type == 'CNN':
+            models.append(MLmodelCNN(classes=10).to(dev))
 
+    torch.set_default_tensor_type('torch.FloatTensor')
     return models
 
 
@@ -214,37 +258,29 @@ def generate_crash_trace(env_cfg, clients_crash_prob_vec):
 
 
 def main():
-    # initialization
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
     ''' Boston housing regression settings '''
-    # env_cfg = EnvSettings(n_clients=5, n_rounds=20, n_epochs=2, batch_size=1, train_pct=0.7, subset_pct=0.4,
-    #                       data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
+    # env_cfg = EnvSettings(n_clients=5, n_rounds=20, n_epochs=2, batch_size=1, train_pct=0.7, sf=False,
+    #                       pick_pct=0.4, data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
     #                       dev='cpu', keep_best=False)
     # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-2)
-    ''' KddCup99 tcpdump SVM classification settings '''
-    # env_cfg = EnvSettings(n_clients=200, n_rounds=30, n_epochs=3, batch_size=100, train_pct=0.7, pick_pct=0.5,
-    #                       data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
+    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-2, lr_decay=1.0)
+    ''' KddCup99 tcpdump SVM classification settings (~2.5min per epoch)'''
+    # env_cfg = EnvSettings(n_clients=200, n_rounds=30, n_epochs=3, batch_size=100, train_pct=0.7, sf=False,
+    #                       pick_pct=0.5, data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
     #                       dev='cpu', keep_best=False)
     # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
-    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2)
-    ''' MNIST digits classification task settings '''
-    env_cfg = EnvSettings(n_clients=50, n_rounds=20, n_epochs=3, batch_size=64, train_pct=6.0/7.0, pick_pct=1.0,
-                          data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.0),
-                          dev='cpu', keep_best=False)
+    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
+    ''' MNIST digits classification task settings (3~4min per epoch on CPU, 1.5min on GPU)'''
+    env_cfg = EnvSettings(n_clients=100, n_rounds=30, n_epochs=5, batch_size=20, train_pct=6.0/7.0, sf=True,
+                          pick_pct=0.5, data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
+                          dev='gpu', keep_best=False)
     task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
-                            in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-2)
-
-    # data loader args, for cuda only
-    kwargs = {'num_workers': 1, 'pin_memory': True} if env_cfg.device == 'gpu' and torch.cuda.is_available() else {}
+                            in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
+    # data loader args, for cuda only (PySyft does not support Cuda yet)
+    # dev = env_cfg.device
+    # kwargs = {'num_workers': 1, 'pin_memory': True} if dev.type=='cuda' and torch.cuda.is_available() else {}
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
-
-    # create clients and client-model-mapping
-    clients = []
-    cm_map = {}
-    for i in range(env_cfg.n_clients):
-        clients.append(sy.VirtualWorker(hook, id='client_' + str(i)))
-        cm_map['client_' + str(i)] = i  # client i with model i
 
     # load data
     if task_cfg.dataset == 'Boston':
@@ -257,25 +293,24 @@ def main():
         data_merged = True
     elif task_cfg.dataset == 'mnist':
         # ref: https://github.com/pytorch/examples/blob/master/mnist/main.py
-        mnist_train = datasets.MNIST('data/mnist/', train=True, download=True,
-                                     transform=transforms.Compose([
-                                         transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]))
-        mnist_test = datasets.MNIST('data/mnist/', train=False, download=True,
-                                    transform=transforms.Compose([
-                                        transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]))
-        data_train_x = mnist_train.data
-        data_train_y = mnist_train.targets
-        data_test_x = mnist_train.data
-        data_test_y = mnist_train.targets
+        mnist_train = torch_datasets.MNIST('data/mnist/', train=True, download=True,
+                                           transform=transforms.Compose([
+                                               transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]))
+        mnist_test = torch_datasets.MNIST('data/mnist/', train=False, download=True,
+                                          transform=transforms.Compose([
+                                              transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]))
+        data_train_x = mnist_train.data.view(-1, 1, 28, 28).float()
+        data_train_y = mnist_train.targets.long()
+        data_test_x = mnist_test.data.view(-1, 1, 28, 28).float()
+        data_test_y = mnist_test.targets.long()
 
-        train_data_size = len(mnist_train)
-        test_data_size = len(mnist_test)
+        train_data_size = len(data_train_x)
+        test_data_size = len(data_test_x)
         data_size = train_data_size + test_data_size
         data_merged = False
     else:
         print('E> Invalid dataset specified')
         exit(-1)
-
     # partition into train/test set, for Boston and Tcpdump data
     if data_merged:
         data_size = len(data)
@@ -287,14 +322,14 @@ def main():
         data_test_x = data[train_data_size:, 0:task_cfg.in_dim]  # test data following, x
         data_test_y = data[train_data_size:, task_cfg.out_dim * -1:].reshape(-1, task_cfg.out_dim)  # test data, x
 
+    clients, cm_map = init_syft_clients(env_cfg.n_clients, hook)  # create clients and a client-index map
     fed_data_train, fed_data_test, client_shard_sizes = utils.get_FL_datasets(data_train_x, data_train_y,
                                                                               data_test_x, data_test_y,
                                                                               env_cfg, clients)
+    # pseudo distributed data loaders, by Syft
+    fed_loader_train = sy.FederatedDataLoader(fed_data_train, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
+    fed_loader_test = sy.FederatedDataLoader(fed_data_test, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
     print('> %d clients data shards (data_dist = %s):' % (env_cfg.n_clients, env_cfg.data_dist[0]), client_shard_sizes)
-
-    # pseudo distributed data loaders
-    fed_loader_train = sy.FederatedDataLoader(fed_data_train, shuffle=False, batch_size=env_cfg.batch_size)
-    fed_loader_test = sy.FederatedDataLoader(fed_data_test, shuffle=False, batch_size=env_cfg.batch_size)
 
     # prepare simulation
     # clients performance
@@ -309,7 +344,9 @@ def main():
     # crash trace simulation
     crash_trace, progress_trace = generate_crash_trace(env_cfg, clients_crash_prob_vec)
 
-    # specify learning task
+    # specify learning task, for Fully Local training
+
+    # reinitialize, for FedAvg
     models = init_models(env_cfg, task_cfg)
     print('> Launching FL...')
     # run FL with FedAvg
@@ -318,7 +355,7 @@ def main():
         run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
                clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
 
-    # reinitialize
+    # reinitialize, for SAFA
     models = init_models(env_cfg, task_cfg)
     print('> Launching SAFA-FL...')
     # run FL with SAFA
@@ -330,6 +367,9 @@ def main():
 
 
 # test area
+# m = MLmodelCNN(10).to(torch.device('cuda'))
+# print(next(m.parameters()).is_cuda)
+# exit(0)
 
 if __name__ == '__main__':
     main()

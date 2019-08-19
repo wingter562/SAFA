@@ -18,8 +18,18 @@ class MLmodelReg(nn.Module):
         self.linear = nn.Linear(in_features, out_features)  # in = independent vars, out = dependent vars
 
         # init weights
-        nn.init.zeros_(self.linear.weight)
-        nn.init.zeros_(self.linear.bias)
+        self.init_weights()
+
+    def init_weights(self, seed=None):
+        # common random seed is vital for the effectiveness of averaging, see fig. 1 in
+        # McMahan, B.'s paper
+        if seed:
+            torch.manual_seed(seed)
+        else:  # all zero init, deprecated (likely to drop in a local-minimal trap)
+            nn.init.zeros_(self.linear.weight)
+            nn.init.zeros_(self.linear.bias)
+
+
 
     def forward(self, x):
         y_pred = self.linear(x)  # y_pred = w * x - b
@@ -44,6 +54,7 @@ class MLmodelSVM(nn.Module):
         # torch.nn.init.zeros_(self.linear.bias)
         self.w = nn.Parameter(torch.zeros(in_features), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
+
 
     def get_w(self):
         return self.w
@@ -91,12 +102,31 @@ class svmLoss(nn.Module):
 
 
 class MLmodelCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, classes=10):
         super(MLmodelCNN, self).__init__()
+        # input = 28*28 PIL.ToTensor()
         self.conv1 = nn.Conv2d(1, 20, 5, 1)  # 20 [(1*)5*5] conv. kernels
         self.conv2 = nn.Conv2d(20, 50, 5, 1)  # 50 [(20*)5*5] conv. kernels
         self.fc1 = nn.Linear(4 * 4 * 50, 500)  # linear 1
-        self.fc2 = nn.Linear(500, 10)  # linear 2
+        self.fc2 = nn.Linear(500, classes)  # linear 2
+
+        self.init_weights(seed=1)
+
+    def init_weights(self, seed=None):
+        # common random seed is vital for the effectiveness of averaging, see fig. 1 in
+        # McMahan, B.'s paper
+        if seed:
+            torch.manual_seed(seed)
+            nn.init.xavier_uniform_(self.conv1.weight)  # current best practice
+            nn.init.xavier_uniform_(self.conv2.weight)
+
+        else:  # deprecated (likely to drop in a local-minimal trap)
+            nn.init.zeros_(self.conv1.weight)
+            nn.init.zeros_(self.conv2.weight)
+            nn.init.zeros_(self.fc1.weight)
+            nn.init.zeros_(self.fc1.bias)
+            nn.init.zeros_(self.fc2.weight)
+            nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
