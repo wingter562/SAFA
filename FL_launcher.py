@@ -18,11 +18,13 @@ import syft as sy
 from sklearn import datasets as sk_datasets
 from sklearn.svm import SVC
 import fedGpuSupport
+import fullyLocalFL
+import primal_FedAvg
+import semiAysnc_FedAvg
 from learning_tasks import MLmodelReg, MLmodelCNN
 from learning_tasks import MLmodelSVM
 import utils
-import primal_FedAvg
-import semiAysnc_FedAvg
+
 
 
 class EnvSettings:
@@ -259,27 +261,25 @@ def generate_crash_trace(env_cfg, clients_crash_prob_vec):
 
 def main():
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
-    ''' Boston housing regression settings '''
-    # env_cfg = EnvSettings(n_clients=5, n_rounds=20, n_epochs=2, batch_size=1, train_pct=0.7, sf=False,
-    #                       pick_pct=0.4, data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
-    #                       dev='cpu', keep_best=False)
-    # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-2, lr_decay=1.0)
+    ''' Boston housing regression settings (3s per epoch)'''
+    env_cfg = EnvSettings(n_clients=5, n_rounds=50, n_epochs=2, batch_size=5, train_pct=0.7, sf=False,
+                          pick_pct=0.5, data_dist=('N', 0.5), perf_dist=('X', None), crash_dist=('E', 0.5),
+                          dev='cpu', keep_best=False)
+    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
+                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
     ''' KddCup99 tcpdump SVM classification settings (~2.5min per epoch)'''
-    # env_cfg = EnvSettings(n_clients=200, n_rounds=30, n_epochs=3, batch_size=100, train_pct=0.7, sf=False,
-    #                       pick_pct=0.5, data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
+    # env_cfg = EnvSettings(n_clients=500, n_rounds=30, n_epochs=3, batch_size=100, train_pct=0.7, sf=False,
+    #                       pick_pct=0.5, data_dist=('N', 0.5), perf_dist=('X', None), crash_dist=('E', 0.5),
     #                       dev='cpu', keep_best=False)
     # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
     #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
     ''' MNIST digits classification task settings (3~4min per epoch on CPU, 1.5min on GPU)'''
-    env_cfg = EnvSettings(n_clients=100, n_rounds=30, n_epochs=5, batch_size=20, train_pct=6.0/7.0, sf=True,
-                          pick_pct=0.5, data_dist=('X', None), perf_dist=('X', None), crash_dist=('E', 0.5),
-                          dev='gpu', keep_best=False)
-    task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
-                            in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
-    # data loader args, for cuda only (PySyft does not support Cuda yet)
-    # dev = env_cfg.device
-    # kwargs = {'num_workers': 1, 'pin_memory': True} if dev.type=='cuda' and torch.cuda.is_available() else {}
+    # env_cfg = EnvSettings(n_clients=100, n_rounds=30, n_epochs=1, batch_size=20, train_pct=6.0/7.0, sf=True,
+    #                       pick_pct=0.5, data_dist=('E', None), perf_dist=('X', None), crash_dist=('E', 0.5),
+    #                       dev='gpu', keep_best=False)
+    # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
+    #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
+
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
 
     # load data
@@ -345,15 +345,23 @@ def main():
     crash_trace, progress_trace = generate_crash_trace(env_cfg, clients_crash_prob_vec)
 
     # specify learning task, for Fully Local training
-
-    # reinitialize, for FedAvg
-    models = init_models(env_cfg, task_cfg)
-    print('> Launching FL...')
-    # run FL with FedAvg
-    env_cfg.mode = 'Primal FedAvg'
-    best_model, best_rd, final_loss = primal_FedAvg. \
-        run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
-               clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
+    # models = init_models(env_cfg, task_cfg)
+    # print('> Launching FL...')
+    # # run FL with FedAvg
+    # env_cfg.mode = 'Fully Local'
+    # best_model, best_rd, final_loss = fullyLocalFL. \
+    #     run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test,
+    #                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+    #                    max_round_interval)
+    #
+    # # reinitialize, for FedAvg
+    # models = init_models(env_cfg, task_cfg)
+    # print('> Launching FL...')
+    # # run FL with FedAvg
+    # env_cfg.mode = 'Primal FedAvg'
+    # best_model, best_rd, final_loss = primal_FedAvg. \
+    #     run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
+    #            clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
 
     # reinitialize, for SAFA
     models = init_models(env_cfg, task_cfg)

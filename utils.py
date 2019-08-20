@@ -79,19 +79,23 @@ def inspect_model(model):
 
 
 def log_stats(f_name, env_cfg, task_cfg, detail_env,
-              epoch_train_trace, epoch_test_trace, round_trace, make_trace, pick_trace, crash_trace, deprecate_trace,
-              client_timers, client_futile_timers, global_timer, best_rd, best_loss,
+              epoch_train_trace, epoch_test_trace, round_trace, acc_trace, make_trace, pick_trace, crash_trace,
+              deprecate_trace, client_timers, client_futile_timers, global_timer, best_rd, best_loss,
               extra_args=None, log_loss_traces=True):
     """
     Save experiment results into a log file
     :param f_name: log file name
     :param env_cfg: federated environment configuration
     :param task_cfg: task configuration
+    :param detail_env: detailed arguments like shards distribution
     :param epoch_train_trace: client train trace
     :param epoch_test_trace: client test trace
     :param round_trace: round trace
+    :param acc_trace: accuracy trace
+    :param make_trace: well-progressed clients trace
     :param pick_trace: client selection trace
     :param crash_trace: client crash trace
+    :param deprecate_trace: deprecated client trace
     :param client_timers: client run time
     :param client_futile_timers: client futile run time
     :param global_timer: global run time
@@ -115,6 +119,7 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
             print('Client train trace:', epoch_train_trace)
             print('Client test trace:', epoch_test_trace)
         print('Round trace:', round_trace)
+        print('accuracy trace:', acc_trace)
         print('> Pick&crash traces')
         print('Make trace:', make_trace)
         print('Pick trace:', pick_trace)
@@ -386,56 +391,51 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
     else:
         print('Error> Invalid data distribution option')
         exit(0)
-
     # split data and dispatch
-    # for PySyft cpu runtime:
-    if env_cfg.device.type == 'cpu' or env_cfg.device.type == 'cuda':
-        for i in range(env_cfg.n_clients):
-            # prepare client data, train and test separately
-            # Note: repeated tests show that barely slicing results in copying the computation graph and the entire
-            # source data into n_clients pieces when sy.BaseDataset.send() is invoked, incurring excessive memory usage
-            # Therefore, we use tensor.clone().requires_grad_(False) to avoid that.
-            client_train_data.append(
-                sy.BaseDataset(data_train_x[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
-                               data_train_y[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False)))
-            client_test_data.append(
-                sy.BaseDataset(data_test_x[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False),
-                               data_test_y[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False)))
-            # allocate the BaseDataset to clients
-            client_train_data[i].send(clients[i])
-            client_test_data[i].send(clients[i])
-        # pseudo distributed data sets
-        fed_data_train = sy.FederatedDataset(client_train_data)
-        fed_data_test = sy.FederatedDataset(client_test_data)
-    # for cuda-support federated data
-    else:
-        for i in range(env_cfg.n_clients):
-            client_train_data.append(
-                fedGS.GpuBaseDataset(
-                    data_train_x[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
-                    data_train_y[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
-                    clients[i]))
-            client_test_data.append(
-                fedGS.GpuBaseDataset(
-                    data_test_x[split_points_test[i]: split_points_test[i + 1]].clone().requires_grad_(False),
-                    data_test_y[split_points_test[i]: split_points_test[i + 1]].clone().requires_grad_(False),
-                    clients[i]))
-            # pseudo distributed data sets
-            fed_data_train = fedGS.GpuFedDataset(client_train_data)
-            fed_data_test = fedGS.GpuFedDataset(client_test_data)
+    for i in range(env_cfg.n_clients):
+        # prepare client data, train and test separately
+        # Note: repeated tests show that barely slicing results in copying the computation graph and the entire
+        # source data into n_clients pieces when sy.BaseDataset.send() is invoked, incurring excessive memory usage
+        # Therefore, we use tensor.clone().requires_grad_(False) to avoid that.
+        client_train_data.append(
+            sy.BaseDataset(data_train_x[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
+                           data_train_y[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False)))
+        client_test_data.append(
+            sy.BaseDataset(data_test_x[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False),
+                           data_test_y[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False)))
+        # allocate the BaseDataset to clients
+        client_train_data[i].send(clients[i])
+        client_test_data[i].send(clients[i])
+    # pseudo distributed data sets
+    fed_data_train = sy.FederatedDataset(client_train_data)
+    fed_data_test = sy.FederatedDataset(client_test_data)
 
     return fed_data_train, fed_data_test, client_shards_sizes
 
 
-def compute_accuracy_SVM(y, y_hat):
+def batch_sum_accuracy(y_hat, y, taskLoss):
     """
     Compute Accuracy = (TP+TN)/(TP+TN+FP+FN)
-    :param y: labels
     :param y_hat: model decisions
-    :return: acc
+    :param y: labels
+    :param taskLoss: i.e., Reg, SVM, or CNN
+    :return: batch_sum_acc and batch count
     """
     assert len(y) == len(y_hat)
     acc = 0.0
-    for res in y*y_hat:
-        acc += 1 if res > 0 else 0
-    return acc/len(y)
+    count = len(y)
+    y_hat, y = y_hat.get(), y.get()
+
+    if taskLoss == 'mse':  # sum up (1 - relative error)
+        y = y.view_as(y_hat)
+        y_hat, y = y_hat.float(), y.float()
+        acc += sum(1 - abs((y - y_hat))/torch.max(y_hat, y))
+    elif taskLoss == 'svmLoss':
+        y = y.view_as(y_hat)
+        for res in y*y_hat:
+            acc += 1 if res > 0 else 0
+    elif taskLoss == 'nllLoss':
+        pred = y_hat.argmax(dim=1, keepdim=True)
+        acc += pred.eq(y.view_as(pred)).sum().item()
+
+    return acc, count

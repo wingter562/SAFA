@@ -149,6 +149,8 @@ def local_test(models, picked_ids, task_cfg, env_cfg,  cm_map, fdl, last_loss_re
     :param last_loss_rep: loss reports in last run
     :return: epoch test loss of each client, batch-summed
     """
+    if not picked_ids:  # no training happens
+        return last_loss_rep
     dev = env_cfg.device
     # initialize loss report, keep loss tracks for idlers, clear those for participants
     client_test_loss_vec = last_loss_rep
@@ -167,8 +169,8 @@ def local_test(models, picked_ids, task_cfg, env_cfg,  cm_map, fdl, last_loss_re
     for m in range(env_cfg.n_clients):
         models[m].eval()
     # local evaluation, batch-wise
-    acc = 0.0  # CNN only
-    count = 0.0  # CNN only
+    acc = 0.0
+    count = 0.0
     with torch.no_grad():
         for batch_id, (inputs, labels) in enumerate(fdl):
             inputs, labels = inputs.to(dev), labels.to(dev)  # data to device
@@ -185,17 +187,13 @@ def local_test(models, picked_ids, task_cfg, env_cfg,  cm_map, fdl, last_loss_re
             # loss
             loss = loss_func(y_hat, labels)
             client_test_loss_vec[model_id] += loss.get().item()
+            models[model_id] = model.get()  # get model back
+            # accuracy
+            b_acc, b_cnt = utils.batch_sum_accuracy(y_hat, labels, task_cfg.loss)
+            acc += b_acc
+            count += b_cnt
 
-            models[model_id] = model.get()
-            # for CNN only
-            if is_cnn:
-                pred = y_hat.argmax(dim=1, keepdim=True)
-                acc += pred.eq(labels.view_as(pred)).get().sum().item()
-                count += len(labels)
-
-    if is_cnn:
-        print('acc = ', acc / count)
-
+    print('> acc = %.6f' % (acc / count))
     return client_test_loss_vec
 
 
@@ -207,7 +205,7 @@ def global_test(model, task_cfg, env_cfg, cm_map, fdl):
     :param env_cfg: environment configurations
     :param cm_map: the client-model map, as a dict
     :param fdl: FederatedDataLoader
-    :return: global model's loss on each client, as a vector
+    :return: global model's loss on each client (as a vector), accuracy
     """
     dev = env_cfg.device
     test_sum_loss_vec = [0 for i in range(env_cfg.n_clients)]
@@ -224,7 +222,8 @@ def global_test(model, task_cfg, env_cfg, cm_map, fdl):
     print('> global test')
     model.eval()
     # local evaluation, batch-wise
-    acc = 0.0  # CNN only
+    acc = 0.0
+    count = 0
     for batch_id, (inputs, labels) in enumerate(fdl):
         inputs, labels = inputs.to(dev), labels.to(dev)  # data to device
         client = inputs.location  # training location (i.e.,the client) recorded by Syft
@@ -236,15 +235,14 @@ def global_test(model, task_cfg, env_cfg, cm_map, fdl):
         # loss
         loss = loss_func(y_hat, labels)
         test_sum_loss_vec[model_id] += loss.get().item()
+        model.get()  # get model back
+        # compute accuracy
+        b_acc, b_cnt = utils.batch_sum_accuracy(y_hat, labels, task_cfg.loss)
+        acc += b_acc
+        count += b_cnt
 
-        model.get()
-        if is_cnn:
-            pred = y_hat.argmax(dim=1, keepdim=True)  # only for test
-            acc += pred.eq(labels.view_as(pred)).get().sum().item()
-    if is_cnn:
-        print('acc = ', acc / 10000.0)
-
-    return test_sum_loss_vec
+    print('>   acc = %.6f' % (acc/count))
+    return test_sum_loss_vec, acc/count
 
 
 def update_cloud_cache(cache, models, the_ids):
@@ -393,6 +391,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     undrafted_trace = []
     deprecated_trace = []
     round_trace = []
+    acc_trace = []
 
     # Counters
     # 1. Global timers, 1 unit = # of batches / client performance, where performance is defined as batch efficiency
@@ -426,7 +425,6 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         picked_ids = select_clients_CFCFM(make_ids, picked_ids, clients_perf_vec, quota)
         # also record well-progressed but undrafted ones
         undrafted_ids = [c_id for c_id in make_ids if c_id not in picked_ids]
-
         # tracing
         make_trace.append(make_ids)
         pick_trace.append(picked_ids)
@@ -447,13 +445,11 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
                 make_ids = bak_make_ids
             reporting_train_loss_vec = train(models, make_ids, env_cfg, cm_map, fed_loader_train, task_cfg,
                                              reporting_train_loss_vec, verbose=False)
-
             # add to trace
             epoch_train_trace.append(
                 np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
             print('>   %d clients train loss vector this epoch:' % env_cfg.n_clients,
                   np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
-
             # local test reports
             reporting_test_loss_vec = local_test(models, make_ids, task_cfg, env_cfg, cm_map, fed_loader_test,
                                                  reporting_test_loss_vec)
@@ -483,7 +479,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         print('\n> Versions updated:', versions)
 
         # Reporting phase: distributed test of the global model
-        post_aggre_loss_vec = global_test(global_model, task_cfg, env_cfg, cm_map, fed_loader_test)
+        post_aggre_loss_vec, acc = global_test(global_model, task_cfg, env_cfg, cm_map, fed_loader_test)
         print('>   post-aggregation loss reports  = ',
               np.array(post_aggre_loss_vec) / ((np.array(client_shard_sizes)) * env_cfg.test_pct))
         # overall loss, i.e., objective (1) in McMahan's paper
@@ -498,6 +494,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
             overall_loss = best_loss
         print('>   post-aggregation loss avg = ', overall_loss)
         round_trace.append(overall_loss)
+        acc_trace.append(acc.item())
 
         # dispatch global model back to clients
         print('>   Dispatching global model to well-progressed clients')
@@ -538,7 +535,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     # Logging
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
-                    round_trace, make_trace, pick_trace, crash_trace, deprecated_trace,
+                    round_trace, acc_trace, make_trace, pick_trace, crash_trace, deprecated_trace,
                     client_timers, client_futile_timers, global_timer,
                     best_rd, best_loss, extra_args={'lag_tolerance': lag_t}, log_loss_traces=False)
 
