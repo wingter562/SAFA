@@ -335,7 +335,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
             overall_loss = best_loss
         print('>   post-aggregation loss avg = ', overall_loss)
         round_trace.append(overall_loss)
-        acc_trace.append(acc.item())
+        acc_trace.append(acc)
 
         # dispatch global model back to clients
         print('>   Dispatching global model to clients')
@@ -364,7 +364,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     print('> Test trace:')
     utils.show_epoch_trace(epoch_test_trace, env_cfg.n_clients, plotting=False, cols=1)
     print('> Round trace:')
-    utils.show_round_trace(round_trace, plotting=True, title_='Primal FedAvg')
+    utils.show_round_trace(round_trace, plotting=False, title_='Primal FedAvg')
 
     # display timers
     print('\n> Experiment stats')
@@ -373,6 +373,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
     print('> Total time consumption:', global_timer)
+    print('> Loss = %.6f/at Round %d:' % (best_loss, best_rd))
 
     # Logging
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)

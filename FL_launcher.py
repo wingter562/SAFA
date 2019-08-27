@@ -11,7 +11,8 @@ from torchvision import datasets as torch_datasets
 from torchvision import transforms
 import copy
 import sys
-import os
+import gc
+import time
 import random
 import numpy as np
 import syft as sy
@@ -24,7 +25,6 @@ import semiAysnc_FedAvg
 from learning_tasks import MLmodelReg, MLmodelCNN
 from learning_tasks import MLmodelSVM
 import utils
-
 
 
 class EnvSettings:
@@ -104,6 +104,51 @@ class TaskSettings:
         self.lr_decay = lr_decay
 
 
+class SimpleFedDataLoader:
+    def __init__(self, fed_dataset, client2idx, batch_size, shuffle=False):
+        self.fed_dataset = fed_dataset.datasets  # FedDatasets.datasets is a clientName-BaseDataset dict
+        self.c_idx2data = [0 for _ in range(len(client2idx))]  # client_idx to dataset mapping list
+        for k, v in self.fed_dataset.items():  # k is client name, v is the associated dataset
+            self.c_idx2data[client2idx[k]] = v  # client2idx: client_name->client/model index
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.batch_ptr = -1  # used for splitting into batches
+        self.baseDataset_ptr = None
+
+        # shuffle  TODO: untested
+        if self.shuffle:
+            for ds in self.c_idx2data:
+                ds_size = ds.data.shape[0]
+                ds.data = ds.data[torch.randperm(ds_size)]
+
+    def __iter__(self):
+        self.client_idx = 0
+        self.batch_ptr = -1  # used for splitting into batches
+        self.baseDataset_ptr = self.c_idx2data[self.client_idx]  # client_0's BaseDataset
+        return self
+
+    def __next__(self):
+        self.batch_ptr += 1  # this batch
+        # update batch location
+        if self.batch_ptr * self.batch_size >= len(self.baseDataset_ptr.data):  # if no more batch for the current client
+            self.batch_ptr = 0  # reset
+            self.client_idx += 1
+            if self.client_idx >= len(self.c_idx2data):  # no more client to iterate through
+                self.stop()
+            self.baseDataset_ptr = self.c_idx2data[self.client_idx]  # next client's BaseDataSet
+
+        right_bound = len(self.baseDataset_ptr.data)
+        this_batch_x = self.baseDataset_ptr.data[self.batch_ptr * self.batch_size:
+                                                 min(right_bound, (self.batch_ptr + 1) * self.batch_size)]
+        this_batch_y = self.baseDataset_ptr.targets[self.batch_ptr * self.batch_size:
+                                                    min(right_bound, (self.batch_ptr + 1) * self.batch_size)]
+
+        return this_batch_x, this_batch_y
+
+    def stop(self):
+        raise StopIteration
+
+
 def save_KddCup99_tcpdump_tcp_tofile(fpath):
     """
     Fetch (from sklearn.datasets) the KddCup99 tcpdump dataset, extract tcp samples, and save to local as csv
@@ -129,11 +174,38 @@ def init_syft_clients(nc, hook):
     :return: clients list, and a client-index map
     """
     clients = []
-    cm_map = {}
+    c_name2idx = {}
     for i in range(nc):
         clients.append(sy.VirtualWorker(hook, id='client_' + str(i)))
-        cm_map['client_' + str(i)] = i  # client i with model i
-    return clients, cm_map
+        c_name2idx['client_' + str(i)] = i  # client i with model i
+    return clients, c_name2idx
+
+
+def clear_syft_memory_and_reinit(fed_data_train, fed_data_test, env_cfg, hook):
+    """
+    Clear syft memory leakage by deleting and re-initializing all client objects and corresponding data sets
+    :param fed_data_train: FederatedDataSet of training
+    :param fed_data_test: FederatedDataSet of test
+    :param env_cfg: environment config
+    :param hook: Pysyft hook
+    :return: new clients, FederatedDataLoader of training and test data
+    """
+    # init new client objects
+    clients, c_name2idx = init_syft_clients(env_cfg.n_clients, hook)
+
+    # rebuild FederatedDatasets and Loaders
+    # train set
+    for c, d in fed_data_train.datasets.items():
+        d.get()
+        d.send(clients[c_name2idx[c]])  # bind data to newly-built clients
+    for c, d in fed_data_test.datasets.items():
+        d.get()
+        d.send(clients[c_name2idx[c]])
+    fed_loader_train = sy.FederatedDataLoader(fed_data_train, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
+    fed_loader_test = sy.FederatedDataLoader(fed_data_test, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
+
+    return clients, fed_loader_train, fed_loader_test
+
 
 
 @DeprecationWarning  # deprecated in favor of Syft built-in Cuda support
@@ -262,19 +334,19 @@ def generate_crash_trace(env_cfg, clients_crash_prob_vec):
 def main():
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
     ''' Boston housing regression settings (3s per epoch)'''
-    env_cfg = EnvSettings(n_clients=5, n_rounds=50, n_epochs=2, batch_size=5, train_pct=0.7, sf=False,
-                          pick_pct=0.5, data_dist=('N', 0.5), perf_dist=('X', None), crash_dist=('E', 0.5),
-                          dev='cpu', keep_best=False)
-    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
-    ''' KddCup99 tcpdump SVM classification settings (~2.5min per epoch)'''
-    # env_cfg = EnvSettings(n_clients=500, n_rounds=30, n_epochs=3, batch_size=100, train_pct=0.7, sf=False,
-    #                       pick_pct=0.5, data_dist=('N', 0.5), perf_dist=('X', None), crash_dist=('E', 0.5),
+    # env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
+    #                       pick_pct=0.5, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', float(argv[1])),
     #                       dev='cpu', keep_best=False)
-    # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
-    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
+    # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
+    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
+    ''' KddCup99 tcpdump SVM classification settings (~15s per epoch on CPU, optimized)'''
+    env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
+                          pick_pct=0.5, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', float(sys.argv[1])),
+                          dev='cpu', keep_best=False)
+    task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
+                            in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
     ''' MNIST digits classification task settings (3~4min per epoch on CPU, 1.5min on GPU)'''
-    # env_cfg = EnvSettings(n_clients=100, n_rounds=30, n_epochs=1, batch_size=20, train_pct=6.0/7.0, sf=True,
+    # env_cfg = EnvSettings(n_clients=100, n_rounds=30, n_epochs=5, batch_size=20, train_pct=6.0/7.0, sf=True,
     #                       pick_pct=0.5, data_dist=('E', None), perf_dist=('X', None), crash_dist=('E', 0.5),
     #                       dev='gpu', keep_best=False)
     # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
@@ -322,13 +394,17 @@ def main():
         data_test_x = data[train_data_size:, 0:task_cfg.in_dim]  # test data following, x
         data_test_y = data[train_data_size:, task_cfg.out_dim * -1:].reshape(-1, task_cfg.out_dim)  # test data, x
 
-    clients, cm_map = init_syft_clients(env_cfg.n_clients, hook)  # create clients and a client-index map
+    clients, c_name2idx = init_syft_clients(env_cfg.n_clients, hook)  # create clients and a client-index map
     fed_data_train, fed_data_test, client_shard_sizes = utils.get_FL_datasets(data_train_x, data_train_y,
                                                                               data_test_x, data_test_y,
                                                                               env_cfg, clients)
     # pseudo distributed data loaders, by Syft
-    fed_loader_train = sy.FederatedDataLoader(fed_data_train, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
-    fed_loader_test = sy.FederatedDataLoader(fed_data_test, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
+    # fed_loader_train = sy.FederatedDataLoader(fed_data_train, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
+    # fed_loader_test = sy.FederatedDataLoader(fed_data_test, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
+    fed_loader_train = SimpleFedDataLoader(fed_data_train, c_name2idx,
+                                           batch_size=env_cfg.batch_size, shuffle=env_cfg.shuffle)
+    fed_loader_test = SimpleFedDataLoader(fed_data_test, c_name2idx,
+                                          batch_size=env_cfg.batch_size, shuffle=env_cfg.shuffle)
     print('> %d clients data shards (data_dist = %s):' % (env_cfg.n_clients, env_cfg.data_dist[0]), client_shard_sizes)
 
     # prepare simulation
@@ -346,32 +422,32 @@ def main():
 
     # specify learning task, for Fully Local training
     # models = init_models(env_cfg, task_cfg)
-    # print('> Launching FL...')
-    # # run FL with FedAvg
+    # print('> Launching Fully Local FL...')
+    # # run FL with Fully local training
     # env_cfg.mode = 'Fully Local'
     # best_model, best_rd, final_loss = fullyLocalFL. \
-    #     run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test,
+    #     run_fullyLocal(env_cfg, task_cfg, models, c_name2idx, data_size, fed_loader_train, fed_loader_test,
     #                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
     #                    max_round_interval)
     #
     # # reinitialize, for FedAvg
     # models = init_models(env_cfg, task_cfg)
-    # print('> Launching FL...')
+    # print('> Launching FedAvg FL...')
     # # run FL with FedAvg
     # env_cfg.mode = 'Primal FedAvg'
     # best_model, best_rd, final_loss = primal_FedAvg. \
-    #     run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
-    #            clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
+    # run_FL(env_cfg, task_cfg, models, c_name2idx, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
+    #        clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
 
     # reinitialize, for SAFA
     models = init_models(env_cfg, task_cfg)
-    print('> Launching SAFA-FL...')
+    print('> Launching SAFA-FL (lag tolerance = %d)' % int(sys.argv[2]))
     # run FL with SAFA
     env_cfg.mode = 'Semi-Async. FedAvg'
     best_model, best_rd, final_loss = semiAysnc_FedAvg. \
-        run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test,
+        run_FL_SAFA(env_cfg, task_cfg, models, c_name2idx, data_size, fed_loader_train, fed_loader_test,
                     client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, max_round_interval,
-                    lag_t=2)
+                    lag_t=int(sys.argv[2]))
 
 
 # test area
@@ -381,3 +457,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

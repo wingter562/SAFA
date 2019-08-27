@@ -126,7 +126,9 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
         # display
         loss_ = loss.get()  # batch-total loss
         print('>   batch loss = ', loss_.item())  # avg. batch loss
-        client_train_loss_vec[model_id] += loss_.item()*len(inputs)  # sum up
+        if np.isnan(loss_.item()):
+            print(y_hat.get(), labels.get())
+        client_train_loss_vec[model_id] += loss_.detach().item()*len(inputs)  # sum up
         # get back before next send
         models[model_id] = model.get()
 
@@ -186,7 +188,7 @@ def local_test(models, picked_ids, task_cfg, env_cfg,  cm_map, fdl, last_loss_re
             y_hat = model(inputs)
             # loss
             loss = loss_func(y_hat, labels)
-            client_test_loss_vec[model_id] += loss.get().item()
+            client_test_loss_vec[model_id] += loss.get().detach().item()
             models[model_id] = model.get()  # get model back
             # accuracy
             b_acc, b_cnt = utils.batch_sum_accuracy(y_hat, labels, task_cfg.loss)
@@ -234,7 +236,7 @@ def global_test(model, task_cfg, env_cfg, cm_map, fdl):
         y_hat = model(inputs)
         # loss
         loss = loss_func(y_hat, labels)
-        test_sum_loss_vec[model_id] += loss.get().item()
+        test_sum_loss_vec[model_id] += loss.get().detach().item()
         model.get()  # get model back
         # compute accuracy
         b_acc, b_cnt = utils.batch_sum_accuracy(y_hat, labels, task_cfg.loss)
@@ -381,8 +383,8 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     :return:
     """
     # traces
-    reporting_train_loss_vec = [0 for _ in range(env_cfg.n_clients)]
-    reporting_test_loss_vec = [0 for _ in range(env_cfg.n_clients)]
+    reporting_train_loss_vec = [0.0 for _ in range(env_cfg.n_clients)]
+    reporting_test_loss_vec = [0.0 for _ in range(env_cfg.n_clients)]
     versions = [-1 for _ in range(env_cfg.n_clients)]
     epoch_train_trace = []
     epoch_test_trace = []
@@ -473,7 +475,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         deprecated_ids = deprecated_ids1 + deprecated_ids2
         deprecated_trace.append(deprecated_ids)
         print('\n> Deprecated clients (models denied):', get_versions(deprecated_ids, versions))
-        update_cloud_cache_deprecated(cache, global_model, deprecated_ids)  # now cache contains all the latest
+        update_cloud_cache_deprecated(cache, global_model, deprecated_ids)  # replace deprecated with the latest global
         # versioning
         update_versions(versions, make_ids, rd)
         print('\n> Versions updated:', versions)
@@ -494,7 +496,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
             overall_loss = best_loss
         print('>   post-aggregation loss avg = ', overall_loss)
         round_trace.append(overall_loss)
-        acc_trace.append(acc.item())
+        acc_trace.append(acc)
 
         # dispatch global model back to clients
         print('>   Dispatching global model to well-progressed clients')
@@ -531,6 +533,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
     print('> Total time consumption:', global_timer)
+    print('> Loss = %.6f/at Round %d:' % (best_loss,best_rd))
 
     # Logging
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)

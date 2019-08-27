@@ -119,7 +119,6 @@ class MLmodelCNN(nn.Module):
             torch.manual_seed(seed)
             nn.init.xavier_uniform_(self.conv1.weight)  # current best practice
             nn.init.xavier_uniform_(self.conv2.weight)
-
         else:  # deprecated (likely to drop in a local-minimal trap)
             nn.init.zeros_(self.conv1.weight)
             nn.init.zeros_(self.conv2.weight)

@@ -110,9 +110,10 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
         print('\n\n> Exp stats. at', datetime.now().strftime('%D-%H:%M'))
         show_settings(env_cfg, task_cfg, detail=True, detail_info=detail_env)
         print('Clients run time:', client_timers)
-        print('Clients futile run time:', client_futile_timers)
+        #print('Clients futile run time:', client_futile_timers)
         futile_pcts = np.array(client_futile_timers) / np.array(client_timers)
-        print('Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
+        # print('Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
+        print('Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts))
         print('Total time consumption:', global_timer)
         if log_loss_traces:
             print('> Loss traces')
@@ -304,8 +305,8 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
     """
     dev = env_cfg.device
     # device
-    data_train_x, data_train_y = data_train_x.to(dev), data_train_y.to(dev)
-    data_test_x, data_test_y = data_test_x.to(dev), data_test_y.to(dev)
+    # data_train_x, data_train_y = data_train_x.to(dev), data_train_y.to(dev)
+    # data_test_x, data_test_y = data_test_x.to(dev), data_test_y.to(dev)
     # metas
     train_size = len(data_train_x)
     test_size = len(data_test_x)
@@ -422,7 +423,7 @@ def batch_sum_accuracy(y_hat, y, taskLoss):
     :return: batch_sum_acc and batch count
     """
     assert len(y) == len(y_hat)
-    acc = 0.0
+    acc = torch.tensor(0.0)
     count = len(y)
     y_hat, y = y_hat.get(), y.get()
 
@@ -433,9 +434,9 @@ def batch_sum_accuracy(y_hat, y, taskLoss):
     elif taskLoss == 'svmLoss':
         y = y.view_as(y_hat)
         for res in y*y_hat:
-            acc += 1 if res > 0 else 0
+            acc += torch.tensor(1.0) if res.item() > 0 else torch.tensor(0.0)
     elif taskLoss == 'nllLoss':
         pred = y_hat.argmax(dim=1, keepdim=True)
         acc += pred.eq(y.view_as(pred)).sum().item()
 
-    return acc, count
+    return acc.detach().item(), count

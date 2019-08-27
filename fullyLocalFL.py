@@ -329,7 +329,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
         task_cfg.lr *= task_cfg.lr_decay  # learning rate decay
 
     # Aggregation step, only once
-    print('\n> Aggregation step (Round #%d)' % rd)
+    print('\n> One-go Aggregation step (Round #%d)' % rd)
     global_model = aggregate(models, client_shard_sizes, data_size)
 
     # Reporting phase: distributed test of the global model
@@ -340,7 +340,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     overall_loss = np.array(post_aggre_loss_vec).sum() / (data_size * env_cfg.test_pct)
     best_loss = overall_loss
     print('>   post-aggregation loss avg = ', overall_loss)
-    final_acc = acc.item()
+    final_acc = acc
     # dispatch global model back to clients
     print('>   Dispatching global model to clients')
     for i in range(env_cfg.n_clients):
@@ -352,7 +352,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     print('> Test trace:')
     utils.show_epoch_trace(epoch_test_trace, env_cfg.n_clients, plotting=False, cols=1)
     print('> Round trace:')
-    utils.show_round_trace([overall_loss], plotting=True, title_='Fully Local')
+    utils.show_round_trace([overall_loss], plotting=False, title_='Fully Local')
 
     # display timers
     print('\n> Experiment stats')
@@ -361,6 +361,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
     print('> Total time consumption:', global_timer)
+    print('> Loss = %.6f/at Round %d:' % (best_loss, best_rd))
 
     # Logging
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
