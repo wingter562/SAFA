@@ -12,6 +12,7 @@ import torch.optim as optim
 import copy
 import sys
 import os
+import math
 import random
 import numpy as np
 import syft as sy
@@ -262,10 +263,11 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     # 1. Global timers, 1 unit = # of batches / client performance, where performance is defined as batch efficiency
     global_timer = 0.0
     # 2. Client timers - record work time of each client
-    client_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
+    client_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
     client_round_timers = []  # in current round
     # 3. Futile counters - progression (i,e, work time) in vain caused by local crashes
-    client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
+    client_futile_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
+    eu_count = 0.0  # effective updates count
     # 4. best loss (global)
     best_rd = -1
     best_loss = float('inf')
@@ -277,7 +279,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
         # reset timers
         client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
         # randomly pick a specified fraction of clients to launch training
-        n_picks = int(env_cfg.n_clients * env_cfg.pick_pct)
+        n_picks = math.ceil(env_cfg.n_clients * env_cfg.pick_pct)
         picked_ids = random.sample(range(env_cfg.n_clients), n_picks)
         picked_ids.sort()
         pick_trace.append(picked_ids)  # tracing
@@ -288,6 +290,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
         make_ids = [c_id for c_id in picked_ids if c_id not in crash_ids]
         # tracing
         make_trace.append(make_ids)
+        eu_count += len(make_ids)  # count effective updates
         print('> Clients crashed: ', crash_ids)
 
         # Local training step
@@ -364,7 +367,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     print('> Test trace:')
     utils.show_epoch_trace(epoch_test_trace, env_cfg.n_clients, plotting=False, cols=1)
     print('> Round trace:')
-    utils.show_round_trace(round_trace, plotting=False, title_='Primal FedAvg')
+    utils.show_round_trace(round_trace, plotting=env_cfg.showplot, title_='Primal FedAvg')
 
     # display timers
     print('\n> Experiment stats')
@@ -372,6 +375,8 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     print('> Clients futile run time:', client_futile_timers)
     futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
+    eu_ratio = eu_count/env_cfg.n_rounds/env_cfg.n_clients
+    print('> EUR:', eu_ratio)
     print('> Total time consumption:', global_timer)
     print('> Loss = %.6f/at Round %d:' % (best_loss, best_rd))
 
@@ -379,7 +384,7 @@ def run_FL(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_l
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     round_trace, acc_trace, make_trace, pick_trace, crash_trace, None,
-                    client_timers, client_futile_timers, global_timer,
+                    client_timers, client_futile_timers, global_timer, eu_ratio, 0.0,
                     best_rd, best_loss, extra_args=None, log_loss_traces=False)
 
     return best_model, best_rd, best_loss

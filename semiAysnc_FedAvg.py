@@ -10,13 +10,13 @@ import torch.optim as optim
 import copy
 import sys
 import os
+import math
 import random
 import numpy as np
 import syft as sy
 import matplotlib.pyplot as plt
 from learning_tasks import MLmodelReg, svmLoss, MLmodelSVM, MLmodelCNN
 import utils
-
 
 
 def select_clients_CFCFM(make_ids, last_round_pick_ids, clients_perf_vec, quota):
@@ -28,6 +28,9 @@ def select_clients_CFCFM(make_ids, last_round_pick_ids, clients_perf_vec, quota)
     :param quota: number of clients to draw this round
     :return: ids of selected clients
     """
+    if len(make_ids) <= quota:  # if not enough well-progress clients to meet the quota
+        return copy.deepcopy(make_ids)
+
     picks = []
     cp_make_ids = copy.deepcopy(make_ids)  # keep the original copy of make_ids
     # priority to clients not picked last round ("Compensatory")
@@ -385,7 +388,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     # traces
     reporting_train_loss_vec = [0.0 for _ in range(env_cfg.n_clients)]
     reporting_test_loss_vec = [0.0 for _ in range(env_cfg.n_clients)]
-    versions = [-1 for _ in range(env_cfg.n_clients)]
+    versions = np.array([-1 for _ in range(env_cfg.n_clients)])
     epoch_train_trace = []
     epoch_test_trace = []
     pick_trace = []
@@ -405,6 +408,8 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     # 3. Futile counters - progression (i,e, work time) in vain caused by denial
     picked_ids = []
     client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
+    eu_count = 0.0  # effective updates count
+    version_var = 0.0
     # 4. best loss (global)
     best_rd = -1
     best_loss = float('inf')
@@ -419,7 +424,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
         picked_client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
         # randomly pick a specified fraction of clients to launch training
-        quota = int(env_cfg.n_clients * env_cfg.pick_pct)  # the quota
+        quota = math.ceil(env_cfg.n_clients * env_cfg.pick_pct)  # the quota
         # simulate device or network failure
         crash_ids = crash_trace[rd]
         make_ids = [c_id for c_id in range(env_cfg.n_clients) if c_id not in crash_ids]
@@ -474,11 +479,14 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         # case 3: deny well-progressed but deprecated clients, replace these cache entries with the global model
         deprecated_ids = deprecated_ids1 + deprecated_ids2
         deprecated_trace.append(deprecated_ids)
-        print('\n> Deprecated clients (models denied):', get_versions(deprecated_ids, versions))
+        print('>   Deprecated clients (models denied):', get_versions(deprecated_ids, versions))
         update_cloud_cache_deprecated(cache, global_model, deprecated_ids)  # replace deprecated with the latest global
         # versioning
+        eu = len(good_picked_ids)  # effective updates
+        eu_count += eu  # EUR
+        version_var += 0.0 if eu == 0 else np.var(versions[good_picked_ids + good_undrafted_ids])  # Version Variance
         update_versions(versions, make_ids, rd)
-        print('\n> Versions updated:', versions)
+        print('>   Versions updated:', versions)
 
         # Reporting phase: distributed test of the global model
         post_aggre_loss_vec, acc = global_test(global_model, task_cfg, env_cfg, cm_map, fed_loader_test)
@@ -524,7 +532,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     print('> Test trace:')
     utils.show_epoch_trace(epoch_test_trace, env_cfg.n_clients, plotting=False, cols=1)
     print('> Round trace:')
-    utils.show_round_trace(round_trace, plotting=True, title_='SAFA')
+    utils.show_round_trace(round_trace, plotting=env_cfg.showplot, title_='SAFA')
 
     # display timers
     print('\n> Experiment stats')
@@ -532,6 +540,10 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     print('> Clients futile run time:', client_futile_timers)
     futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
+    eu_ratio = eu_count / env_cfg.n_rounds / env_cfg.n_clients
+    print('> EUR:', eu_ratio)
+    version_var = version_var/env_cfg.n_rounds
+    print('> VV:', version_var)
     print('> Total time consumption:', global_timer)
     print('> Loss = %.6f/at Round %d:' % (best_loss,best_rd))
 
@@ -539,7 +551,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     round_trace, acc_trace, make_trace, pick_trace, crash_trace, deprecated_trace,
-                    client_timers, client_futile_timers, global_timer,
+                    client_timers, client_futile_timers, global_timer, eu_ratio, version_var,
                     best_rd, best_loss, extra_args={'lag_tolerance': lag_t}, log_loss_traces=False)
 
     return best_model, best_rd, best_loss

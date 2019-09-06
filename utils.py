@@ -80,8 +80,8 @@ def inspect_model(model):
 
 def log_stats(f_name, env_cfg, task_cfg, detail_env,
               epoch_train_trace, epoch_test_trace, round_trace, acc_trace, make_trace, pick_trace, crash_trace,
-              deprecate_trace, client_timers, client_futile_timers, global_timer, best_rd, best_loss,
-              extra_args=None, log_loss_traces=True):
+              deprecate_trace, client_timers, client_futile_timers, global_timer, eu_ratio, version_var,
+              best_rd, best_loss, extra_args=None, log_loss_traces=True):
     """
     Save experiment results into a log file
     :param f_name: log file name
@@ -99,6 +99,8 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
     :param client_timers: client run time
     :param client_futile_timers: client futile run time
     :param global_timer: global run time
+    :param eu_ratio: Effective Update ratio
+    :param version_var: Version variance
     :param best_rd: round index at which best model is achieved
     :param best_loss: best model's global loss
     :param extra_args: extra arguments, for extended FL
@@ -109,11 +111,13 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
         set_print_device('to_file', f_handle=f)
         print('\n\n> Exp stats. at', datetime.now().strftime('%D-%H:%M'))
         show_settings(env_cfg, task_cfg, detail=True, detail_info=detail_env)
-        print('Clients run time:', client_timers)
+        #print('Clients run time:', client_timers)
         #print('Clients futile run time:', client_futile_timers)
         futile_pcts = np.array(client_futile_timers) / np.array(client_timers)
         # print('Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
         print('Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts))
+        print('EUR: %.6f' % eu_ratio)
+        print('VV: %.6f' % version_var)
         print('Total time consumption:', global_timer)
         if log_loss_traces:
             print('> Loss traces')
@@ -122,12 +126,13 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
         print('Round trace:', round_trace)
         print('accuracy trace:', acc_trace)
         print('> Pick&crash traces')
-        print('Make trace:', make_trace)
-        print('Pick trace:', pick_trace)
-        print('Crash trace:', crash_trace)
-        print('Deprecate trace(SAFA only):', deprecate_trace)
+        #print('Make trace:', make_trace)
+        #print('Pick trace:', pick_trace)
+        #print('Crash trace:', crash_trace)
+        #print('Deprecate trace(SAFA only):', deprecate_trace)
         print('Extra args(SAFA only):', extra_args)
         print('Best loss = %.6f at round #%d' % (best_loss, best_rd))
+        print('Best accuracy:', np.max(acc_trace))
 
         # reset
         set_print_device('stdout')
@@ -430,7 +435,7 @@ def batch_sum_accuracy(y_hat, y, taskLoss):
     if taskLoss == 'mse':  # sum up (1 - relative error)
         y = y.view_as(y_hat)
         y_hat, y = y_hat.float(), y.float()
-        acc += sum(1 - abs((y - y_hat))/torch.max(y_hat, y))
+        acc += sum(1.0 - abs((y - y_hat))/torch.max(y_hat, y)).item()
     elif taskLoss == 'svmLoss':
         y = y.view_as(y_hat)
         for res in y*y_hat:
@@ -440,3 +445,5 @@ def batch_sum_accuracy(y_hat, y, taskLoss):
         acc += pred.eq(y.view_as(pred)).sum().item()
 
     return acc.detach().item(), count
+
+

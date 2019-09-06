@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import copy
 import sys
 import os
+import math
 import random
 import numpy as np
 import syft as sy
@@ -222,7 +223,7 @@ def aggregate(models, local_shards_sizes, data_size):
     :param data_size: total data size
     :return: a global model
     """
-    print('>   Aggregating (FedAvg)...')
+    print('>   Aggregating (fully local)...')
     global_model_params = []
     client_weights_vec = np.array(local_shards_sizes) / data_size  # client weights (i.e., n_k / n)
     for m in range(len(models)):  # for each local model
@@ -256,12 +257,13 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
 
     # Counters
     # 1. Global timers, 1 unit = # of batches / client performance, where performance is defined as batch efficiency
-    global_timer = 0.0
+    global_timer = 0.01
     # 2. Client timers - record work time of each client
-    client_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
+    client_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
     client_round_timers = []  # in current round
     # 3. Futile counters - progression (i,e, work time) in vain caused by local crashes
     client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
+    eu_count = 0.0  # effective updates count
     # 4. best loss (global)
     best_rd = -1
     best_loss = float('inf')
@@ -273,7 +275,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
         # reset timers
         client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
         # randomly pick a specified fraction of clients to launch training
-        n_picks = int(env_cfg.n_clients * env_cfg.pick_pct)
+        n_picks = math.ceil(env_cfg.n_clients * env_cfg.pick_pct)
         picked_ids = random.sample(range(env_cfg.n_clients), n_picks)
         picked_ids.sort()
         pick_trace.append(picked_ids)  # tracing
@@ -284,6 +286,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
         make_ids = [c_id for c_id in picked_ids if c_id not in crash_ids]
         # tracing
         make_trace.append(make_ids)
+        eu_count += len(make_ids)
         print('> Clients crashed: ', crash_ids)
 
         # Local training step
@@ -319,9 +322,10 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
                 client_round_timers[c_id] = env_cfg.n_epochs / env_cfg.batch_size * client_shard_sizes[c_id] \
                                             / clients_perf_vec[c_id]
                 client_timers[c_id] += client_round_timers[c_id]
-                if c_id in crash_ids:  # failed clients
-                    client_futile_timers[c_id] += client_round_timers[c_id] * client_round_progress[c_id]
-        round_time = round_interval if len(crash_ids) > 0 else max(client_round_timers)  # fixed interval if crash
+                # no futile time for Fully local
+                # if c_id in crash_ids:  # failed clients
+                #     client_futile_timers[c_id] += client_round_timers[c_id] * client_round_progress[c_id]
+        round_time = max(client_round_timers)  # no waiting for the crashed
         global_timer += round_time
 
         print('> Round client run time:', client_round_timers)  # round estimated finish time
@@ -352,7 +356,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     print('> Test trace:')
     utils.show_epoch_trace(epoch_test_trace, env_cfg.n_clients, plotting=False, cols=1)
     print('> Round trace:')
-    utils.show_round_trace([overall_loss], plotting=False, title_='Fully Local')
+    utils.show_round_trace([overall_loss], plotting=env_cfg.showplot, title_='Fully Local')
 
     # display timers
     print('\n> Experiment stats')
@@ -360,6 +364,8 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     print('> Clients futile run time:', client_futile_timers)
     futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
+    eu_ratio = eu_count / env_cfg.n_rounds / env_cfg.n_clients
+    print('> EUR:', eu_ratio)
     print('> Total time consumption:', global_timer)
     print('> Loss = %.6f/at Round %d:' % (best_loss, best_rd))
 
@@ -367,7 +373,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     [overall_loss], [final_acc], make_trace, pick_trace, crash_trace, None,
-                    client_timers, client_futile_timers, global_timer,
+                    client_timers, client_futile_timers, global_timer, eu_ratio, 0.0,
                     best_rd, best_loss, extra_args=None, log_loss_traces=False)
 
     return best_model, best_rd, best_loss

@@ -52,9 +52,11 @@ class EnvSettings:
             ('U',(low, high)): uniform distribution between low and high
         keep_best: keep so-far best global model if True, otherwise update anyway after aggregation
         dev: running device
+        showplot: plot and show round trace
     """
     def __init__(self, n_clients=3, n_rounds=3, n_epochs=1, batch_size=1, train_pct=0.7, sf=False,
-                 pick_pct=1.0, data_dist=None, perf_dist=None, crash_dist=None, keep_best=False, dev='cpu'):
+                 pick_pct=1.0, data_dist=None, perf_dist=None, crash_dist=None, keep_best=False, dev='cpu',
+                 showplot=False):
         self.mode = None
         self.n_clients = n_clients
         self.n_rounds = n_rounds
@@ -71,6 +73,7 @@ class EnvSettings:
         self.crash_dist = crash_dist  # client crash probability distribution
 
         self.keep_best = keep_best
+        self.showplot = showplot
 
         # runtime
         if dev == 'cpu':
@@ -109,17 +112,20 @@ class SimpleFedDataLoader:
         self.fed_dataset = fed_dataset.datasets  # FedDatasets.datasets is a clientName-BaseDataset dict
         self.c_idx2data = [0 for _ in range(len(client2idx))]  # client_idx to dataset mapping list
         for k, v in self.fed_dataset.items():  # k is client name, v is the associated dataset
-            self.c_idx2data[client2idx[k]] = v  # client2idx: client_name->client/model index
+            self.c_idx2data[client2idx[k]] = v  # c_idx2data: client idx->BaseDataset mapping
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.batch_ptr = -1  # used for splitting into batches
         self.baseDataset_ptr = None
 
-        # shuffle  TODO: untested
+        # shuffle
+        # DeprecationWarning: bug in Syft.tensor.shape makes indexing throw exception
         if self.shuffle:
             for ds in self.c_idx2data:
-                ds_size = ds.data.shape[0]
-                ds.data = ds.data[torch.randperm(ds_size)]
+                ds_size = len(ds)
+                rand_idcs = torch.randperm(ds_size).tolist()
+                ds.data = ds.data[rand_idcs]
+                ds.targets = ds.targets[rand_idcs]
 
     def __iter__(self):
         self.client_idx = 0
@@ -248,12 +254,17 @@ def init_models(env_cfg, task_cfg):
     return models
 
 
-def generate_clients_perf(env_cfg):
+def generate_clients_perf(env_cfg, from_file=False):
     """
     Generate a series of client performance values (in virtual time unit) following specified distribution
     :param env_cfg: environment config file
+    :param from_file: if True, load client performance distribution from file
     :return: a list of client's performance, measured in virtual unit
     """
+    if from_file:
+        fname = 'gen/clients_perf_'+ str(env_cfg.n_clients)
+        return np.loadtxt(fname)
+
     n_clients = env_cfg.n_clients
     perf_vec = None
     # Case 1: Equal performance
@@ -331,27 +342,74 @@ def generate_crash_trace(env_cfg, clients_crash_prob_vec):
     return crash_trace, progress_trace
 
 
+def get_empirical_lat_t(task_cfg, env_cfg):
+    """
+    Get an optimal value of SAFA's parameter lag_tolerance empirically
+    :param task_cfg: task config
+    :param env_cfg: environment config
+    :return: lag_tolerance
+    """
+    expect_crash_prob = -1.
+    # compute Expectation of client crash probability
+    if env_cfg.crash_dist[0] == 'E':  # Equal crash prob.
+        expect_crash_prob = env_cfg.crash_dist[1]
+    elif env_cfg.crash_dist[0] == 'U':  # Uniform crash prob.
+        expect_crash_prob = 0.5* (env_cfg.crash_dist[1][0] +env_cfg.crash_dist[1][1])
+
+    # case 1: regression
+    if task_cfg.task_type == 'Reg':
+        if expect_crash_prob <= 0.3:
+            return 2
+        elif expect_crash_prob <=0.5:
+            return 3
+        else:  # above 0.5
+            return 4
+    # case 2: CNN
+    elif task_cfg.task_type == 'CNN':
+        if expect_crash_prob <= 0.1:
+            return 3
+        elif expect_crash_prob <=0.3:
+            return 5
+        elif expect_crash_prob <=0.5:
+            return 4
+        else:
+            return 5
+    # case 3: SVM
+    elif task_cfg.task_type == 'SVM':
+        if expect_crash_prob <= 0.3:
+            return 4
+        else:
+            return 5
+    else:
+        return -1  # invalid config
+
+
 def main():
+    # params to tune
+    cr_prob = float(sys.argv[1])
+    lag_tol = int(sys.argv[2])
+    pick_C = float(sys.argv[3])
+
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
     ''' Boston housing regression settings (3s per epoch)'''
-    # env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
-    #                       pick_pct=0.5, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', float(argv[1])),
-    #                       dev='cpu', keep_best=False)
-    # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
-    ''' KddCup99 tcpdump SVM classification settings (~15s per epoch on CPU, optimized)'''
-    env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
-                          pick_pct=0.5, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', float(sys.argv[1])),
-                          dev='cpu', keep_best=False)
-    task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
-                            in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
-    ''' MNIST digits classification task settings (3~4min per epoch on CPU, 1.5min on GPU)'''
-    # env_cfg = EnvSettings(n_clients=100, n_rounds=30, n_epochs=5, batch_size=20, train_pct=6.0/7.0, sf=True,
-    #                       pick_pct=0.5, data_dist=('E', None), perf_dist=('X', None), crash_dist=('E', 0.5),
-    #                       dev='gpu', keep_best=False)
+    env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
+                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+                          keep_best=False, dev='cpu', showplot=False)
+    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
+                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
+    ''' MNIST digits classification task settings (1~2min per epoch on GPU)'''
+    # env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
+    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_dist),
+    #                       keep_best=False, dev='gpu', showplot=False)
     # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
     #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
-
+    ''' KddCup99 tcpdump SVM classification settings (~15s per epoch on CPU, optimized)'''
+    # env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
+    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_dist,
+    #                       keep_best=False, dev='cpu', showplot=False)
+    # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
+    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
+    #
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
 
     # load data
@@ -409,7 +467,8 @@ def main():
 
     # prepare simulation
     # clients performance
-    clients_perf_vec = generate_clients_perf(env_cfg)
+    clients_perf_vec = generate_clients_perf(env_cfg, from_file=True)
+
     print('> Clients perf vec:', clients_perf_vec)
     # max round interval is reached when any crash occurs
     max_round_interval = max(
@@ -441,13 +500,14 @@ def main():
 
     # reinitialize, for SAFA
     models = init_models(env_cfg, task_cfg)
-    print('> Launching SAFA-FL (lag tolerance = %d)' % int(sys.argv[2]))
+    # lag_tol = get_empirical_lat_t(task_cfg, env_cfg)
+    print('> Launching SAFA-FL (lag tolerance = %d)' % lag_tol)
     # run FL with SAFA
     env_cfg.mode = 'Semi-Async. FedAvg'
     best_model, best_rd, final_loss = semiAysnc_FedAvg. \
         run_FL_SAFA(env_cfg, task_cfg, models, c_name2idx, data_size, fed_loader_train, fed_loader_test,
                     client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, max_round_interval,
-                    lag_t=int(sys.argv[2]))
+                    lag_t=lag_tol)
 
 
 # test area
