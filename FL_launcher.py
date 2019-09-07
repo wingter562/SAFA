@@ -254,6 +254,30 @@ def init_models(env_cfg, task_cfg):
     return models
 
 
+def init_glob_model(env_cfg, task_cfg):
+    """
+    Initialize the global model as per the settings of FL and machine learning task
+    :param env_cfg:
+    :param task_cfg:
+    :return: model
+    """
+    model = None
+    dev = env_cfg.device
+    # have to transiently set default tensor type to cuda.float, otherwise model.to(dev) fails on GPU
+    if dev.type == 'cuda':
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    # instantiate models, one per client
+    if task_cfg.task_type == 'Reg':
+        model = MLmodelReg(in_features=task_cfg.in_dim, out_features=task_cfg.out_dim).to(dev)
+    elif task_cfg.task_type == 'SVM':
+        model = MLmodelSVM(in_features=task_cfg.in_dim).to(dev)
+    elif task_cfg.task_type == 'CNN':
+        model = MLmodelCNN(classes=10).to(dev)
+
+    torch.set_default_tensor_type('torch.FloatTensor')
+    return model
+
+
 def generate_clients_perf(env_cfg, from_file=False):
     """
     Generate a series of client performance values (in virtual time unit) following specified distribution
@@ -342,6 +366,7 @@ def generate_crash_trace(env_cfg, clients_crash_prob_vec):
     return crash_trace, progress_trace
 
 
+# Deprecated
 def get_empirical_lat_t(task_cfg, env_cfg):
     """
     Get an optimal value of SAFA's parameter lag_tolerance empirically
@@ -386,9 +411,9 @@ def get_empirical_lat_t(task_cfg, env_cfg):
 
 def main():
     # params to tune
-    cr_prob = float(sys.argv[1])
-    lag_tol = int(sys.argv[2])
-    pick_C = float(sys.argv[3])
+    cr_prob = float(sys.argv[1])  # E(cr)
+    lag_tol = int(sys.argv[2])  # lag tolerance, for SAFA
+    pick_C = float(sys.argv[3])  # pick percent, for FedAvg and SAFA
 
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
     ''' Boston housing regression settings (3s per epoch)'''
@@ -399,13 +424,13 @@ def main():
                             in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
     ''' MNIST digits classification task settings (1~2min per epoch on GPU)'''
     # env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
-    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_dist),
+    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
     #                       keep_best=False, dev='gpu', showplot=False)
     # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
     #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
     ''' KddCup99 tcpdump SVM classification settings (~15s per epoch on CPU, optimized)'''
     # env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
-    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_dist,
+    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob,
     #                       keep_best=False, dev='cpu', showplot=False)
     # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
     #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
@@ -479,35 +504,36 @@ def main():
     # crash trace simulation
     crash_trace, progress_trace = generate_crash_trace(env_cfg, clients_crash_prob_vec)
 
-    # specify learning task, for Fully Local training
-    # models = init_models(env_cfg, task_cfg)
+    # # specify learning task, for Fully Local training
+    # glob_model = init_glob_model(env_cfg, task_cfg)
     # print('> Launching Fully Local FL...')
     # # run FL with Fully local training
     # env_cfg.mode = 'Fully Local'
     # best_model, best_rd, final_loss = fullyLocalFL. \
-    #     run_fullyLocal(env_cfg, task_cfg, models, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+    #     run_fullyLocal(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
     #                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
     #                    max_round_interval)
     #
     # # reinitialize, for FedAvg
-    # models = init_models(env_cfg, task_cfg)
+    # glob_model = init_glob_model(env_cfg, task_cfg)
     # print('> Launching FedAvg FL...')
     # # run FL with FedAvg
     # env_cfg.mode = 'Primal FedAvg'
     # best_model, best_rd, final_loss = primal_FedAvg. \
-    # run_FL(env_cfg, task_cfg, models, c_name2idx, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
-    #        clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval)
+    #     run_FL(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+    #            client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+    #            max_round_interval)
 
     # reinitialize, for SAFA
-    models = init_models(env_cfg, task_cfg)
+    glob_model = init_glob_model(env_cfg, task_cfg)
     # lag_tol = get_empirical_lat_t(task_cfg, env_cfg)
     print('> Launching SAFA-FL (lag tolerance = %d)' % lag_tol)
     # run FL with SAFA
     env_cfg.mode = 'Semi-Async. FedAvg'
     best_model, best_rd, final_loss = semiAysnc_FedAvg. \
-        run_FL_SAFA(env_cfg, task_cfg, models, c_name2idx, data_size, fed_loader_train, fed_loader_test,
-                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, max_round_interval,
-                    lag_t=lag_tol)
+        run_FL_SAFA(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+                    max_round_interval, lag_t=lag_tol)
 
 
 # test area

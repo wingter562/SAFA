@@ -80,7 +80,7 @@ def inspect_model(model):
 
 def log_stats(f_name, env_cfg, task_cfg, detail_env,
               epoch_train_trace, epoch_test_trace, round_trace, acc_trace, make_trace, pick_trace, crash_trace,
-              deprecate_trace, client_timers, client_futile_timers, global_timer, eu_ratio, version_var,
+              deprecate_trace, client_timers, client_futile_timers, global_timer, eu_ratio, sync_ratio, version_var,
               best_rd, best_loss, extra_args=None, log_loss_traces=True):
     """
     Save experiment results into a log file
@@ -100,6 +100,7 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
     :param client_futile_timers: client futile run time
     :param global_timer: global run time
     :param eu_ratio: Effective Update ratio
+    :param sync_ratio: Sync. Ratio
     :param version_var: Version variance
     :param best_rd: round index at which best model is achieved
     :param best_loss: best model's global loss
@@ -117,6 +118,7 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
         # print('Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
         print('Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts))
         print('EUR: %.6f' % eu_ratio)
+        print('SR: %.6f' % sync_ratio)
         print('VV: %.6f' % version_var)
         print('Total time consumption:', global_timer)
         if log_loss_traces:

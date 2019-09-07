@@ -250,6 +250,19 @@ def global_test(model, task_cfg, env_cfg, cm_map, fdl):
     return test_sum_loss_vec, acc/count
 
 
+def init_cache(glob_model, env_cfg):
+    """
+    Initiate cloud cache with the global model
+    :param glob_model:  initial global model
+    :param env_cfg:  env config
+    :return: the cloud cache
+    """
+    cache = []
+    for i in range(env_cfg.n_clients):
+        cache.append(copy.deepcopy(glob_model))
+    return cache
+
+
 def update_cloud_cache(cache, models, the_ids):
     """
     Update the model cache residing on the cloud, it contains the latest non-aggregated models
@@ -263,16 +276,16 @@ def update_cloud_cache(cache, models, the_ids):
         cache[id] = copy.deepcopy(models[id])
 
 
-def update_cloud_cache_deprecated(cache, global_model, straggler_ids):
+def update_cloud_cache_deprecated(cache, global_model, deprecated_ids):
     """
     Update entries of those clients lagging too much behind with the latest global model
     :param cache: the model cache
     :param global_model: the aggregated global model
-    :param straggler_ids: ids of clients to update cache
+    :param deprecated_ids: ids of clients to update cache
     :return:
     """
     # use deepcopy to decouple cloud cache and local models
-    for id in straggler_ids:
+    for id in deprecated_ids:
         cache[id] = copy.deepcopy(global_model)
 
 
@@ -366,13 +379,13 @@ def safa_aggregate(models, local_shards_sizes, data_size):
     return global_model
 
 
-def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
-                clients_perf_vec, clients_crash_prob_vec, crash_trace, max_round_interval, lag_t=1):
+def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
+                clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval, lag_t=1):
     """
     Run FL with SAFA algorithm
     :param env_cfg: environment config
     :param task_cfg: task config
-    :param models: local models
+    :param glob_model: the global model
     :param cm_map: client-model mapping
     :param data_size: total data size
     :param fed_loader_train: federated training set
@@ -381,10 +394,19 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     :param clients_perf_vec: performance values of clients
     :param clients_crash_prob_vec: crash probs of clients
     :param crash_trace: simulated crash trace
+    :param progress_trace: simulated progress trace
     :param max_round_interval: maximum round interval
     :param lag_t: tolerance of lag
     :return:
     """
+    # init
+    global_model = glob_model  # the global model
+    models = [None for _ in range(env_cfg.n_clients)]  # local models
+    client_ids = list(range(env_cfg.n_clients))
+    distribute_to_local(global_model, models, client_ids)  # init local models
+    # global cache, storing models to merge before aggregation and latest models after aggregation.
+    cache = None  # cache will be initiated in the very first epoch
+
     # traces
     reporting_train_loss_vec = [0.0 for _ in range(env_cfg.n_clients)]
     reporting_test_loss_vec = [0.0 for _ in range(env_cfg.n_clients)]
@@ -409,14 +431,13 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     picked_ids = []
     client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
     eu_count = 0.0  # effective updates count
+    sync_count = 0.0  # synchronization count
     version_var = 0.0
     # 4. best loss (global)
     best_rd = -1
     best_loss = float('inf')
     best_model = None
 
-    # global cache, storing models to merge before aggregation and latest models after aggregation.
-    cache = copy.deepcopy(models)  # initial
     # begin training: global rounds
     for rd in range(env_cfg.n_rounds):
         print('\n> Round #%d' % rd)
@@ -440,9 +461,27 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         print('> Clients undrafted: ', undrafted_ids)
         print('> Clients picked: ', picked_ids)  # first-come-first-merge
 
+        # distributing step
+        # distribute the global model to the edge in a discriminative manner
+        print('>   @Cloud> dispatching global model to the edge')
+        good_ids, deprecated_ids = version_filter(versions, client_ids, rd - 1, lag_tolerant=lag_t)  # find deprecated
+        latest_ids, straggler_ids = version_filter(versions, good_ids, rd - 1, lag_tolerant=0)  # find latest/straggled
+        # case 1: deprecated clients
+        distribute_to_local(global_model, models, deprecated_ids)  # deprecated clients are forced to sync. (sync.)
+        update_cloud_cache_deprecated(cache, global_model, deprecated_ids)  # replace deprecated entries in cache
+        deprecated_trace.append(deprecated_ids)
+        print('>   @Cloud> Deprecated clients (forced to sync.):', get_versions(deprecated_ids, versions))
+        update_versions(versions, deprecated_ids, rd-1)  # no longer deprecated
+        # case 2: latest clients
+        distribute_to_local(global_model, models, latest_ids)  # up-to-version clients will sync. (sync.)
+        # case 3: non-deprecated stragglers
+        # Moderately straggling clients remain unsync.
+        # for 1. saving of downloading bandwidth, and 2. reservation of their potential progress (async.)
+        sync_count += len(deprecated_ids) + len(latest_ids)  # count sync. overheads
+
         # Local training step
         for epo in range(env_cfg.n_epochs):  # local epochs (same # of epochs for each client)
-            print('\n> local epoch #%d' % epo)
+            print('\n> @Edge> local epoch #%d' % epo)
             # invoke mini-batch training on selected clients, from the 2nd epoch
             if rd + epo == 0:  # 1st epoch all-in to get start points
                 bak_make_ids = copy.deepcopy(make_ids)
@@ -455,7 +494,7 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
             # add to trace
             epoch_train_trace.append(
                 np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
-            print('>   %d clients train loss vector this epoch:' % env_cfg.n_clients,
+            print('>   @Edge> %d clients train loss vector this epoch:' % env_cfg.n_clients,
                   np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
             # local test reports
             reporting_test_loss_vec = local_test(models, make_ids, task_cfg, env_cfg, cm_map, fed_loader_test,
@@ -463,34 +502,28 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
             # add to trace
             epoch_test_trace.append(
                 np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
-            print('>   %d clients test loss vector this epoch:' % env_cfg.n_clients,
+            print('>   @Edge> %d clients test loss vector this epoch:' % env_cfg.n_clients,
                   np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
 
         # Aggregation step
-        # discriminative update cloud cache and aggregate
-        # case 1: update cache from picked clients, before aggregation
-        good_picked_ids, deprecated_ids1 = version_filter(versions, picked_ids, rd-1, lag_tolerant=lag_t)  # by version
-        update_cloud_cache(cache, models, good_picked_ids)
+        # discriminative update of cloud cache and aggregate
+        # pre-aggregation: update cache from picked clients
+        update_cloud_cache(cache, models, picked_ids)
         print('\n> Aggregation step (Round #%d)' % rd)
         global_model = safa_aggregate(cache, client_shard_sizes, data_size)  # aggregation
-        # case 2: update cache from undrafted clients, after aggregation
-        good_undrafted_ids, deprecated_ids2 = version_filter(versions, undrafted_ids, rd-1, lag_tolerant=lag_t)
-        update_cloud_cache(cache, models, good_undrafted_ids)
-        # case 3: deny well-progressed but deprecated clients, replace these cache entries with the global model
-        deprecated_ids = deprecated_ids1 + deprecated_ids2
-        deprecated_trace.append(deprecated_ids)
-        print('>   Deprecated clients (models denied):', get_versions(deprecated_ids, versions))
-        update_cloud_cache_deprecated(cache, global_model, deprecated_ids)  # replace deprecated with the latest global
+        # post-aggregation: update cache from undrafted clients
+        update_cloud_cache(cache, models, undrafted_ids)
+
         # versioning
-        eu = len(good_picked_ids)  # effective updates
+        eu = len(picked_ids)  # effective updates
         eu_count += eu  # EUR
-        version_var += 0.0 if eu == 0 else np.var(versions[good_picked_ids + good_undrafted_ids])  # Version Variance
+        version_var += 0.0 if eu == 0 else np.var(versions[make_ids])  # Version Variance
         update_versions(versions, make_ids, rd)
-        print('>   Versions updated:', versions)
+        print('>   @Cloud> Versions updated:', versions)
 
         # Reporting phase: distributed test of the global model
         post_aggre_loss_vec, acc = global_test(global_model, task_cfg, env_cfg, cm_map, fed_loader_test)
-        print('>   post-aggregation loss reports  = ',
+        print('>   @Edge> post-aggregation loss reports  = ',
               np.array(post_aggre_loss_vec) / ((np.array(client_shard_sizes)) * env_cfg.test_pct))
         # overall loss, i.e., objective (1) in McMahan's paper
         overall_loss = np.array(post_aggre_loss_vec).sum() / (data_size*env_cfg.test_pct)
@@ -502,25 +535,21 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
         if env_cfg.keep_best:  # if to keep best
             global_model = best_model
             overall_loss = best_loss
-        print('>   post-aggregation loss avg = ', overall_loss)
+        print('>   @Cloud> post-aggregation loss avg = ', overall_loss)
         round_trace.append(overall_loss)
         acc_trace.append(acc)
-
-        # dispatch global model back to clients
-        print('>   Dispatching global model to well-progressed clients')
-        distribute_to_local(global_model, models, make_ids)
 
         # update timers
         for c_id in range(env_cfg.n_clients):
             if c_id in make_ids:
                 # time = # of batches run / perf
-                client_round_timers[c_id] = env_cfg.n_epochs / env_cfg.batch_size * client_shard_sizes[c_id] \
+                client_round_timers[c_id] = client_shard_sizes[c_id] / env_cfg.batch_size * env_cfg.n_epochs \
                                             / clients_perf_vec[c_id]
                 client_timers[c_id] += client_round_timers[c_id]
                 if c_id in picked_ids:
                     picked_client_round_timers[c_id] = client_round_timers[c_id]  # we need to wait the picked
-                if c_id in deprecated_ids:  # denied clients
-                    client_futile_timers[c_id] += client_round_timers[c_id]
+                if c_id in deprecated_ids:  # deprecated clients, forced to sync. at distributing step
+                    client_futile_timers[c_id] += progress_trace[rd][c_id] * client_round_timers[c_id]
         round_time = max_round_interval if len(make_ids) < quota else max(picked_client_round_timers)
         global_timer += round_time
 
@@ -542,25 +571,36 @@ def run_FL_SAFA(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, 
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
     eu_ratio = eu_count / env_cfg.n_rounds / env_cfg.n_clients
     print('> EUR:', eu_ratio)
+    sync_ratio = sync_count / env_cfg.n_rounds / env_cfg.n_clients
+    print('> SR:', sync_ratio)
     version_var = version_var/env_cfg.n_rounds
     print('> VV:', version_var)
     print('> Total time consumption:', global_timer)
-    print('> Loss = %.6f/at Round %d:' % (best_loss,best_rd))
+    print('> Loss = %.6f/at Round %d:' % (best_loss, best_rd))
 
     # Logging
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     round_trace, acc_trace, make_trace, pick_trace, crash_trace, deprecated_trace,
-                    client_timers, client_futile_timers, global_timer, eu_ratio, version_var,
+                    client_timers, client_futile_timers, global_timer, eu_ratio, sync_ratio, version_var,
                     best_rd, best_loss, extra_args={'lag_tolerance': lag_t}, log_loss_traces=False)
 
     return best_model, best_rd, best_loss
 
 
 # test area
-# picked_ids = select_clients_CFCFM([0, 1, 3, 4], [0],[0.9,1.2,3.2,0.4,0.8],3)
-# print(picked_ids)
+# client_ids = [0,1,2, 3,4]
+# versions =   [3,3,0,-1,2]
+# rd = 4
+# good_ids, deprecated_ids = version_filter(versions, client_ids, rd - 1, lag_tolerant=3)  # find deprecated
+# latest_ids, straggler_ids = version_filter(versions, good_ids, rd - 1, lag_tolerant=0)  # find latest/straggled
+# print(good_ids)
+# print(deprecated_ids)
+# print(latest_ids)
+# print(straggler_ids)
 # exit(0)
+
+
 
 
 

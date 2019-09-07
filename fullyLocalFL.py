@@ -214,9 +214,21 @@ def global_test(model, task_cfg, env_cfg, cm_map, fdl):
     return test_sum_loss_vec, acc/count
 
 
+def distribute_to_local(global_model, models, make_ids):
+    """
+    Distribute the global model to local clients
+    :param global_model: aggregated global model
+    :param models: local models
+    :param make_ids: ids of clients that will replace their local models with the global one
+    :return:
+    """
+    for id in make_ids:
+        models[id] = copy.deepcopy(global_model)
+
+
 def aggregate(models, local_shards_sizes, data_size):
     """
-    The function implements aggregation step (FedAvg), i.e., w = sum_k(n_k/n * w_k)
+    The function implements aggregation step, i.e., w = sum_k(n_k/n * w_k)
     :param models: a list of local models
     :param picked_ids: selected client indices for local training
     :param local_shards_sizes: a list of local data sizes, aligned with the orders of local models, say clients.
@@ -245,8 +257,31 @@ def aggregate(models, local_shards_sizes, data_size):
     return global_model
 
 
-def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
+def run_fullyLocal(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
                    clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, round_interval):
+    """
+    Run fully local FL
+    :param env_cfg:
+    :param task_cfg:
+    :param glob_model:
+    :param cm_map:
+    :param data_size:
+    :param fed_loader_train:
+    :param fed_loader_test:
+    :param client_shard_sizes:
+    :param clients_perf_vec:
+    :param clients_crash_prob_vec:
+    :param crash_trace:
+    :param progress_trace:
+    :param round_interval:
+    :return:
+    """
+    # init
+    global_model = glob_model  # the global model
+    models = [None for _ in range(env_cfg.n_clients)]  # local models
+    client_ids = list(range(env_cfg.n_clients))
+    distribute_to_local(global_model, models, client_ids)  # init local models
+
     # traces
     reporting_train_loss_vec = [0 for _ in range(env_cfg.n_clients)]
     reporting_test_loss_vec = [0 for _ in range(env_cfg.n_clients)]
@@ -264,6 +299,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     # 3. Futile counters - progression (i,e, work time) in vain caused by local crashes
     client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
     eu_count = 0.0  # effective updates count
+    sync_count = 0.0  # synchronization count
     # 4. best loss (global)
     best_rd = -1
     best_loss = float('inf')
@@ -291,7 +327,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
 
         # Local training step
         for epo in range(env_cfg.n_epochs):  # local epochs (same # of epochs for each client)
-            print('\n> local epoch #%d' % epo)
+            print('\n> @Edge> local epoch #%d' % epo)
             # invoke mini-batch training on selected clients, from the 2nd epoch
             if rd + epo == 0:  # 1st epoch all-in to get start points
                 bak_make_ids = copy.deepcopy(make_ids)
@@ -303,7 +339,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
             # add to trace
             epoch_train_trace.append(
                 np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
-            print('>   %d clients train loss vector this epoch:' % env_cfg.n_clients,
+            print('>   @Edge> %d clients train loss vector this epoch:' % env_cfg.n_clients,
                   np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
 
             # local test reports
@@ -312,14 +348,14 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
             # add to trace
             epoch_test_trace.append(
                 np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
-            print('>   %d clients test loss vector this epoch:' % env_cfg.n_clients,
+            print('>   @Edge> %d clients test loss vector this epoch:' % env_cfg.n_clients,
                   np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
 
         # update timers
         for c_id in range(env_cfg.n_clients):
             if c_id in picked_ids:
                 # time = # of batches run / perf
-                client_round_timers[c_id] = env_cfg.n_epochs / env_cfg.batch_size * client_shard_sizes[c_id] \
+                client_round_timers[c_id] = client_shard_sizes[c_id] / env_cfg.batch_size * env_cfg.n_epochs \
                                             / clients_perf_vec[c_id]
                 client_timers[c_id] += client_round_timers[c_id]
                 # no futile time for Fully local
@@ -333,22 +369,22 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
         task_cfg.lr *= task_cfg.lr_decay  # learning rate decay
 
     # Aggregation step, only once
-    print('\n> One-go Aggregation step (Round #%d)' % rd)
+    print('\n> @Cloud> One-go Aggregation step (Round #%d)' % rd)
     global_model = aggregate(models, client_shard_sizes, data_size)
 
     # Reporting phase: distributed test of the global model
     post_aggre_loss_vec, acc = global_test(global_model, task_cfg, env_cfg, cm_map, fed_loader_test)
-    print('>   post-aggregation loss reports  = ',
+    print('>   @Edge> post-aggregation loss reports  = ',
           np.array(post_aggre_loss_vec) / ((np.array(client_shard_sizes)) * env_cfg.test_pct))
     # overall loss, i.e., objective (1) in McMahan's paper
     overall_loss = np.array(post_aggre_loss_vec).sum() / (data_size * env_cfg.test_pct)
     best_loss = overall_loss
-    print('>   post-aggregation loss avg = ', overall_loss)
+    print('>   @Cloud> post-aggregation loss avg = ', overall_loss)
     final_acc = acc
     # dispatch global model back to clients
-    print('>   Dispatching global model to clients')
-    for i in range(env_cfg.n_clients):
-        models[i] = copy.deepcopy(global_model)
+    print('>   @Cloud> dispatching global model to clients')
+    distribute_to_local(global_model, models, client_ids)
+    sync_count += len(client_ids)  # sync. overheads
 
     # Traces
     print('> Train trace:')
@@ -366,6 +402,8 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
     eu_ratio = eu_count / env_cfg.n_rounds / env_cfg.n_clients
     print('> EUR:', eu_ratio)
+    sync_ratio = sync_count / env_cfg.n_rounds / env_cfg.n_clients
+    print('> SR:', sync_ratio)
     print('> Total time consumption:', global_timer)
     print('> Loss = %.6f/at Round %d:' % (best_loss, best_rd))
 
@@ -373,7 +411,7 @@ def run_fullyLocal(env_cfg, task_cfg, models, cm_map, data_size, fed_loader_trai
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     [overall_loss], [final_acc], make_trace, pick_trace, crash_trace, None,
-                    client_timers, client_futile_timers, global_timer, eu_ratio, 0.0,
+                    client_timers, client_futile_timers, global_timer, eu_ratio, sync_ratio, 0.0,
                     best_rd, best_loss, extra_args=None, log_loss_traces=False)
 
     return best_model, best_rd, best_loss
