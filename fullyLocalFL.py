@@ -303,6 +303,7 @@ def run_fullyLocal(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_
     # 4. best loss (global)
     best_rd = -1
     best_loss = float('inf')
+    best_acc = -1.0
     best_model = None
 
     # begin training: global rounds

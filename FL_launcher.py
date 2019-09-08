@@ -417,21 +417,21 @@ def main():
 
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
     ''' Boston housing regression settings (3s per epoch)'''
-    env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
-                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-                          keep_best=False, dev='cpu', showplot=False)
-    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
-    ''' MNIST digits classification task settings (1~2min per epoch on GPU)'''
-    # env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
+    # env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
     #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-    #                       keep_best=False, dev='gpu', showplot=False)
-    # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
-    #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
+    #                       keep_best=True, dev='cpu', showplot=False)
+    # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
+    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
+    ''' MNIST digits classification task settings (1~2min per epoch on GPU)'''
+    env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
+                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+                          keep_best=True, dev='gpu', showplot=False)
+    task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
+                            in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
     ''' KddCup99 tcpdump SVM classification settings (~15s per epoch on CPU, optimized)'''
     # env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
     #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob,
-    #                       keep_best=False, dev='cpu', showplot=False)
+    #                       keep_best=True, dev='cpu', showplot=False)
     # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
     #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
     #
@@ -504,25 +504,25 @@ def main():
     # crash trace simulation
     crash_trace, progress_trace = generate_crash_trace(env_cfg, clients_crash_prob_vec)
 
-    # # specify learning task, for Fully Local training
-    # glob_model = init_glob_model(env_cfg, task_cfg)
-    # print('> Launching Fully Local FL...')
-    # # run FL with Fully local training
-    # env_cfg.mode = 'Fully Local'
-    # best_model, best_rd, final_loss = fullyLocalFL. \
-    #     run_fullyLocal(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
-    #                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
-    #                    max_round_interval)
-    #
-    # # reinitialize, for FedAvg
-    # glob_model = init_glob_model(env_cfg, task_cfg)
-    # print('> Launching FedAvg FL...')
-    # # run FL with FedAvg
-    # env_cfg.mode = 'Primal FedAvg'
-    # best_model, best_rd, final_loss = primal_FedAvg. \
-    #     run_FL(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
-    #            client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
-    #            max_round_interval)
+    # specify learning task, for Fully Local training
+    glob_model = init_glob_model(env_cfg, task_cfg)
+    print('> Launching Fully Local FL...')
+    # run FL with Fully local training
+    env_cfg.mode = 'Fully Local'
+    best_model, best_rd, final_loss = fullyLocalFL. \
+        run_fullyLocal(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+                       client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+                       max_round_interval)
+
+    # reinitialize, for FedAvg
+    glob_model = init_glob_model(env_cfg, task_cfg)
+    print('> Launching FedAvg FL...')
+    # run FL with FedAvg
+    env_cfg.mode = 'Primal FedAvg'
+    best_model, best_rd, final_loss = primal_FedAvg. \
+        run_FL(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+               client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+               max_round_interval)
 
     # reinitialize, for SAFA
     glob_model = init_glob_model(env_cfg, task_cfg)

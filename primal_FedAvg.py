@@ -307,6 +307,7 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
     # 4. best loss (global)
     best_rd = -1
     best_loss = float('inf')
+    best_acc = -1.0
     best_model = None
 
     # begin training: global rounds
@@ -372,11 +373,13 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
         # update so-far best
         if overall_loss < best_loss:
             best_loss = overall_loss
+            best_acc = acc
             best_model = global_model
             best_rd = rd
         if env_cfg.keep_best:  # if to keep best
             global_model = best_model
             overall_loss = best_loss
+            acc = best_acc
         print('>   @Cloud> post-aggregation loss avg = ', overall_loss)
         round_trace.append(overall_loss)
         acc_trace.append(acc)

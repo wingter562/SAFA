@@ -436,6 +436,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     # 4. best loss (global)
     best_rd = -1
     best_loss = float('inf')
+    best_acc = -1.0
     best_model = None
 
     # begin training: global rounds
@@ -530,11 +531,13 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
         # update so-far best
         if overall_loss < best_loss:
             best_loss = overall_loss
+            best_acc = acc
             best_model = global_model
             best_rd = rd
         if env_cfg.keep_best:  # if to keep best
             global_model = best_model
             overall_loss = best_loss
+            acc = best_acc
         print('>   @Cloud> post-aggregation loss avg = ', overall_loss)
         round_trace.append(overall_loss)
         acc_trace.append(acc)
@@ -550,7 +553,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
                     picked_client_round_timers[c_id] = client_round_timers[c_id]  # we need to wait the picked
                 if c_id in deprecated_ids:  # deprecated clients, forced to sync. at distributing step
                     client_futile_timers[c_id] += progress_trace[rd][c_id] * client_round_timers[c_id]
-        round_time = max_round_interval if len(make_ids) < quota else max(picked_client_round_timers)
+        round_time = max_round_interval if len(make_ids) < quota else max(picked_client_round_timers)  # w8 to meet quota
         global_timer += round_time
 
         print('> Round client run time:', client_round_timers)  # round estimated finish time
