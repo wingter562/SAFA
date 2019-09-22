@@ -423,18 +423,18 @@ def main():
     # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
     #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
     ''' MNIST digits classification task settings (1~2min per epoch on GPU)'''
-    env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
-                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-                          keep_best=True, dev='gpu', showplot=False)
-    task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
-                            in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
+    # env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
+    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+    #                       keep_best=True, dev='gpu', showplot=False)
+    # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
+    #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
     ''' KddCup99 tcpdump SVM classification settings (~15s per epoch on CPU, optimized)'''
-    # env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
-    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob,
-    #                       keep_best=True, dev='cpu', showplot=False)
-    # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
-    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
-    #
+    env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
+                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+                          keep_best=True, dev='cpu', showplot=False)
+    task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
+                            in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
+
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
 
     # load data
@@ -504,6 +504,7 @@ def main():
     # crash trace simulation
     crash_trace, progress_trace = generate_crash_trace(env_cfg, clients_crash_prob_vec)
 
+    # launching
     # specify learning task, for Fully Local training
     glob_model = init_glob_model(env_cfg, task_cfg)
     print('> Launching Fully Local FL...')
