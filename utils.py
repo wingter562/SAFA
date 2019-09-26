@@ -438,13 +438,13 @@ def batch_sum_accuracy(y_hat, y, taskLoss):
         y = y.view_as(y_hat)
         y_hat, y = y_hat.float(), y.float()
         acc += sum(1.0 - abs((y - y_hat))/torch.max(y_hat, y)).item()
+    elif taskLoss == 'nllLoss':
+        pred = y_hat.argmax(dim=1, keepdim=True)
+        acc += pred.eq(y.view_as(pred)).sum().item()
     elif taskLoss == 'svmLoss':
         y = y.view_as(y_hat)
         for res in y*y_hat:
             acc += torch.tensor(1.0) if res.item() > 0 else torch.tensor(0.0)
-    elif taskLoss == 'nllLoss':
-        pred = y_hat.argmax(dim=1, keepdim=True)
-        acc += pred.eq(y.view_as(pred)).sum().item()
 
     return acc.detach().item(), count
 

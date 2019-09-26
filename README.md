@@ -1,3 +1,4 @@
+Conda Env: fed/
 Federated Learning and several improved versions, implemented using:
 - Python 3.7.3
 and packages including:

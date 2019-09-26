@@ -417,6 +417,7 @@ def main():
 
     hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
     ''' Boston housing regression settings (3s per epoch)'''
+    ''' https://archive.ics.uci.edu/ml/machine-learning-databases/housing/ '''
     # env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
     #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
     #                       keep_best=True, dev='cpu', showplot=False)
@@ -429,6 +430,7 @@ def main():
     # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
     #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
     ''' KddCup99 tcpdump SVM classification settings (~15s per epoch on CPU, optimized)'''
+    ''' https://kdd.ics.uci.edu/databases/kddcup99/kddcup99.html '''
     env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
                           pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
                           keep_best=True, dev='cpu', showplot=False)

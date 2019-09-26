@@ -55,7 +55,6 @@ class MLmodelSVM(nn.Module):
         self.w = nn.Parameter(torch.zeros(in_features), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
-
     def get_w(self):
         return self.w
 
