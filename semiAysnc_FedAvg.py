@@ -104,20 +104,17 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
             print('Err> Invalid optimizer %s specified' % task_cfg.optimizer)
 
     # begin an epoch of training
-    for batch_id, (inputs, labels) in enumerate(fdl):
+    for batch_id, (inputs, labels, client) in enumerate(fdl):
         inputs, labels = inputs.to(dev), labels.to(dev)  # data to device
-        client = inputs.location  # training location (i.e.,the client) recorded by Syft, an object
         model_id = cm_map[client.id]  # locate the right model index
         # neglect non-participants
         if model_id not in picked_ids:
             continue
         # mini-batch GD
-        print('\n> Batch #', batch_id, 'on', inputs.location.id)
+        print('\n> Batch #', batch_id, 'on', client.id)
         print('>   model_id = ', model_id)
         model = models[model_id]
         optimizer = optimizers[model_id]
-        # send out for local training
-        model.send(client)
         # gradient descent procedure
         optimizer.zero_grad()
         y_hat = model(inputs)
@@ -128,13 +125,8 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
         optimizer.step()
 
         # display
-        loss_ = loss.get()  # batch-total loss
-        print('>   batch loss = ', loss_.item())  # avg. batch loss
-        if np.isnan(loss_.item()):
-            print(y_hat.get(), labels.get())
-        client_train_loss_vec[model_id] += loss_.detach().item()*len(inputs)  # sum up
-        # get back before next send
-        models[model_id] = model.get()
+        print('>   batch loss = ', loss.item())  # avg. batch loss
+        client_train_loss_vec[model_id] += loss.detach().item()*len(inputs)  # sum up
 
     # Restore printing
     if not verbose:
@@ -178,22 +170,18 @@ def local_test(models, picked_ids, task_cfg, env_cfg,  cm_map, fdl, last_loss_re
     acc = 0.0
     count = 0.0
     with torch.no_grad():
-        for batch_id, (inputs, labels) in enumerate(fdl):
+        for batch_id, (inputs, labels, client) in enumerate(fdl):
             inputs, labels = inputs.to(dev), labels.to(dev)  # data to device
-            client = inputs.location  # training location (i.e.,the client) recorded by Syft
             model_id = cm_map[client.id]  # locate the right model index
             # neglect non-participants
             if model_id not in picked_ids:
                 continue
             model = models[model_id]
-            # send out for local test
-            model.send(client)
             # inference
             y_hat = model(inputs)
             # loss
             loss = loss_func(y_hat, labels)
-            client_test_loss_vec[model_id] += loss.get().detach().item()
-            models[model_id] = model.get()  # get model back
+            client_test_loss_vec[model_id] += loss.detach().item()
             # accuracy
             b_acc, b_cnt = utils.batch_sum_accuracy(y_hat, labels, task_cfg.loss)
             acc += b_acc
@@ -230,18 +218,14 @@ def global_test(model, task_cfg, env_cfg, cm_map, fdl):
     # local evaluation, batch-wise
     acc = 0.0
     count = 0
-    for batch_id, (inputs, labels) in enumerate(fdl):
+    for batch_id, (inputs, labels, client) in enumerate(fdl):
         inputs, labels = inputs.to(dev), labels.to(dev)  # data to device
-        client = inputs.location  # training location (i.e.,the client) recorded by Syft
         model_id = cm_map[client.id]
-        # send model to data
-        model.send(client)
         # inference
         y_hat = model(inputs)
         # loss
         loss = loss_func(y_hat, labels)
-        test_sum_loss_vec[model_id] += loss.get().detach().item()
-        model.get()  # get model back
+        test_sum_loss_vec[model_id] += loss.detach().item()
         # compute accuracy
         b_acc, b_cnt = utils.batch_sum_accuracy(y_hat, labels, task_cfg.loss)
         acc += b_acc

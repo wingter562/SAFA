@@ -12,7 +12,7 @@ import torch
 import syft as sy
 import matplotlib.pyplot as plt
 from sklearn import datasets
-import fedGpuSupport as fedGS
+import FLLocalSupport as FLSup
 
 
 def set_print_device(dev, f_handle=None):
@@ -308,7 +308,7 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
     :param data_test_y: test data Y to split
     :param env_cfg: environment config file
     :param clients: client objects
-    :return: a list of client-wise training data, a list of client-wise test data, and a list of sizes of shards
+    :return: FLFedDataset of training data, FLFedDataset of test data, and a list of sizes of shards
     """
     dev = env_cfg.device
     # device
@@ -406,17 +406,17 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
         # source data into n_clients pieces when sy.BaseDataset.send() is invoked, incurring excessive memory usage
         # Therefore, we use tensor.clone().requires_grad_(False) to avoid that.
         client_train_data.append(
-            sy.BaseDataset(data_train_x[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False),
-                           data_train_y[split_points_train[i]: split_points_train[i+1]].clone().requires_grad_(False)))
+            FLSup.FLBaseDataset(data_train_x[split_points_train[i]: split_points_train[i+1]],
+                                data_train_y[split_points_train[i]: split_points_train[i+1]]))
         client_test_data.append(
-            sy.BaseDataset(data_test_x[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False),
-                           data_test_y[split_points_test[i]: split_points_test[i+1]].clone().requires_grad_(False)))
+            FLSup.FLBaseDataset(data_test_x[split_points_test[i]: split_points_test[i+1]],
+                                data_test_y[split_points_test[i]: split_points_test[i+1]]))
         # allocate the BaseDataset to clients
-        client_train_data[i].send(clients[i])
-        client_test_data[i].send(clients[i])
+        client_train_data[i].bind(clients[i])
+        client_test_data[i].bind(clients[i])
     # pseudo distributed data sets
-    fed_data_train = sy.FederatedDataset(client_train_data)
-    fed_data_test = sy.FederatedDataset(client_test_data)
+    fed_data_train = FLSup.FLFedDataset(client_train_data)
+    fed_data_test = FLSup.FLFedDataset(client_test_data)
 
     return fed_data_train, fed_data_test, client_shards_sizes
 
@@ -432,7 +432,6 @@ def batch_sum_accuracy(y_hat, y, taskLoss):
     assert len(y) == len(y_hat)
     acc = torch.tensor(0.0)
     count = len(y)
-    y_hat, y = y_hat.get(), y.get()
 
     if taskLoss == 'mse':  # sum up (1 - relative error)
         y = y.view_as(y_hat)

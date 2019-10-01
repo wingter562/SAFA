@@ -18,7 +18,7 @@ import numpy as np
 import syft as sy
 from sklearn import datasets as sk_datasets
 from sklearn.svm import SVC
-import fedGpuSupport
+import FLLocalSupport as FLSup
 import fullyLocalFL
 import primal_FedAvg
 import semiAysnc_FedAvg
@@ -107,54 +107,6 @@ class TaskSettings:
         self.lr_decay = lr_decay
 
 
-class SimpleFedDataLoader:
-    def __init__(self, fed_dataset, client2idx, batch_size, shuffle=False):
-        self.fed_dataset = fed_dataset.datasets  # FedDatasets.datasets is a clientName-BaseDataset dict
-        self.c_idx2data = [0 for _ in range(len(client2idx))]  # client_idx to dataset mapping list
-        for k, v in self.fed_dataset.items():  # k is client name, v is the associated dataset
-            self.c_idx2data[client2idx[k]] = v  # c_idx2data: client idx->BaseDataset mapping
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.batch_ptr = -1  # used for splitting into batches
-        self.baseDataset_ptr = None
-
-        # shuffle
-        # DeprecationWarning: bug in Syft.tensor.shape makes indexing throw exception
-        if self.shuffle:
-            for ds in self.c_idx2data:
-                ds_size = len(ds)
-                rand_idcs = torch.randperm(ds_size).tolist()
-                ds.data = ds.data[rand_idcs]
-                ds.targets = ds.targets[rand_idcs]
-
-    def __iter__(self):
-        self.client_idx = 0
-        self.batch_ptr = -1  # used for splitting into batches
-        self.baseDataset_ptr = self.c_idx2data[self.client_idx]  # client_0's BaseDataset
-        return self
-
-    def __next__(self):
-        self.batch_ptr += 1  # this batch
-        # update batch location
-        if self.batch_ptr * self.batch_size >= len(self.baseDataset_ptr.data):  # if no more batch for the current client
-            self.batch_ptr = 0  # reset
-            self.client_idx += 1
-            if self.client_idx >= len(self.c_idx2data):  # no more client to iterate through
-                self.stop()
-            self.baseDataset_ptr = self.c_idx2data[self.client_idx]  # next client's BaseDataSet
-
-        right_bound = len(self.baseDataset_ptr.data)
-        this_batch_x = self.baseDataset_ptr.data[self.batch_ptr * self.batch_size:
-                                                 min(right_bound, (self.batch_ptr + 1) * self.batch_size)]
-        this_batch_y = self.baseDataset_ptr.targets[self.batch_ptr * self.batch_size:
-                                                    min(right_bound, (self.batch_ptr + 1) * self.batch_size)]
-
-        return this_batch_x, this_batch_y
-
-    def stop(self):
-        raise StopIteration
-
-
 def save_KddCup99_tcpdump_tcp_tofile(fpath):
     """
     Fetch (from sklearn.datasets) the KddCup99 tcpdump dataset, extract tcp samples, and save to local as csv
@@ -213,9 +165,7 @@ def clear_syft_memory_and_reinit(fed_data_train, fed_data_test, env_cfg, hook):
     return clients, fed_loader_train, fed_loader_test
 
 
-
-@DeprecationWarning  # deprecated in favor of Syft built-in Cuda support
-def init_cuda_clients(nc):
+def init_FL_clients(nc):
     """
     # Create clients and a client-index map
     :param nc:  # of cuda clients
@@ -224,7 +174,7 @@ def init_cuda_clients(nc):
     clients = []
     cm_map = {}
     for i in range(nc):
-        clients.append(fedGpuSupport.GpuClient(id='client_' + str(i)))
+        clients.append(FLSup.FLClient(id='client_' + str(i)))
         cm_map['client_' + str(i)] = i  # client i with model i
     return clients, cm_map
 
@@ -415,27 +365,27 @@ def main():
     lag_tol = int(sys.argv[2])  # lag tolerance, for SAFA
     pick_C = float(sys.argv[3])  # pick percent, for FedAvg and SAFA
 
-    hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
-    ''' Boston housing regression settings (3s per epoch)'''
+    # hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
+    ''' Boston housing regression settings (ms per epoch)'''
     ''' https://archive.ics.uci.edu/ml/machine-learning-databases/housing/ '''
-    # env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
-    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-    #                       keep_best=True, dev='cpu', showplot=False)
-    # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
-    ''' MNIST digits classification task settings (1~2min per epoch on GPU)'''
+    env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
+                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+                          keep_best=True, dev='cpu', showplot=False)
+    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
+                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
+    ''' MNIST digits classification task settings (3s per epoch on GPU)'''
     # env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
     #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
     #                       keep_best=True, dev='gpu', showplot=False)
     # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
     #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
-    ''' KddCup99 tcpdump SVM classification settings (~15s per epoch on CPU, optimized)'''
+    ''' KddCup99 tcpdump SVM classification settings (~0.3s per epoch on CPU, optimized)'''
     ''' https://kdd.ics.uci.edu/databases/kddcup99/kddcup99.html '''
-    env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
-                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-                          keep_best=True, dev='cpu', showplot=False)
-    task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
-                            in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
+    # env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
+    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+    #                       keep_best=True, dev='cpu', showplot=False)
+    # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
+    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
 
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
 
@@ -479,17 +429,17 @@ def main():
         data_test_x = data[train_data_size:, 0:task_cfg.in_dim]  # test data following, x
         data_test_y = data[train_data_size:, task_cfg.out_dim * -1:].reshape(-1, task_cfg.out_dim)  # test data, x
 
-    clients, c_name2idx = init_syft_clients(env_cfg.n_clients, hook)  # create clients and a client-index map
+    clients, c_name2idx = init_FL_clients(env_cfg.n_clients)  # create clients and a client-index map
     fed_data_train, fed_data_test, client_shard_sizes = utils.get_FL_datasets(data_train_x, data_train_y,
                                                                               data_test_x, data_test_y,
                                                                               env_cfg, clients)
     # pseudo distributed data loaders, by Syft
     # fed_loader_train = sy.FederatedDataLoader(fed_data_train, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
     # fed_loader_test = sy.FederatedDataLoader(fed_data_test, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
-    fed_loader_train = SimpleFedDataLoader(fed_data_train, c_name2idx,
-                                           batch_size=env_cfg.batch_size, shuffle=env_cfg.shuffle)
-    fed_loader_test = SimpleFedDataLoader(fed_data_test, c_name2idx,
-                                          batch_size=env_cfg.batch_size, shuffle=env_cfg.shuffle)
+    fed_loader_train = FLSup.SimpleFedDataLoader(fed_data_train, c_name2idx,
+                                                 batch_size=env_cfg.batch_size, shuffle=env_cfg.shuffle)
+    fed_loader_test = FLSup.SimpleFedDataLoader(fed_data_test, c_name2idx,
+                                                batch_size=env_cfg.batch_size, shuffle=env_cfg.shuffle)
     print('> %d clients data shards (data_dist = %s):' % (env_cfg.n_clients, env_cfg.data_dist[0]), client_shard_sizes)
 
     # prepare simulation
@@ -508,24 +458,24 @@ def main():
 
     # launching
     # specify learning task, for Fully Local training
-    glob_model = init_glob_model(env_cfg, task_cfg)
-    print('> Launching Fully Local FL...')
-    # run FL with Fully local training
-    env_cfg.mode = 'Fully Local'
-    best_model, best_rd, final_loss = fullyLocalFL. \
-        run_fullyLocal(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
-                       client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
-                       max_round_interval)
+    # glob_model = init_glob_model(env_cfg, task_cfg)
+    # print('> Launching Fully Local FL...')
+    # # run FL with Fully local training
+    # env_cfg.mode = 'Fully Local'
+    # best_model, best_rd, final_loss = fullyLocalFL. \
+    #     run_fullyLocal(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+    #                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+    #                    max_round_interval)
 
     # reinitialize, for FedAvg
-    glob_model = init_glob_model(env_cfg, task_cfg)
-    print('> Launching FedAvg FL...')
-    # run FL with FedAvg
-    env_cfg.mode = 'Primal FedAvg'
-    best_model, best_rd, final_loss = primal_FedAvg. \
-        run_FL(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
-               client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
-               max_round_interval)
+    # glob_model = init_glob_model(env_cfg, task_cfg)
+    # print('> Launching FedAvg FL...')
+    # # run FL with FedAvg
+    # env_cfg.mode = 'Primal FedAvg'
+    # best_model, best_rd, final_loss = primal_FedAvg. \
+    #     run_FL(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+    #            client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+    #            max_round_interval)
 
     # reinitialize, for SAFA
     glob_model = init_glob_model(env_cfg, task_cfg)
