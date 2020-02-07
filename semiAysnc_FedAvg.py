@@ -11,47 +11,74 @@ import torch.optim as optim
 import copy
 import sys
 import os
+import time
+from datetime import datetime
 import math
 import random
 import numpy as np
-import syft as sy
+# import syft as sy
 import matplotlib.pyplot as plt
 from learning_tasks import MLmodelReg, svmLoss, MLmodelSVM, MLmodelCNN
 import utils
 
 
-def select_clients_CFCFM(make_ids, last_round_pick_ids, clients_perf_vec, quota):
+def get_cross_rounders(clients_est_round_T_train, max_round_interval):
+    cross_rounder_ids = []
+    for c_id in range(len(clients_est_round_T_train)):
+        if clients_est_round_T_train[c_id] > max_round_interval:
+            cross_rounder_ids.append(c_id)
+    return cross_rounder_ids
+
+
+def sort_ids_by_perf_desc(id_list, perf_list):
+    """
+    Sort a list of client ids according to their performance, in an descending ordered
+    :param id_list: a list of client ids to sort
+    :param perf_list: full list of all clients' perf
+    :return: sorted id_list
+    """
+    # make use of a map
+    cp_map = {}  # client-perf-map
+    for id in id_list:
+        cp_map[id] = perf_list[id]  # build the map with corresponding perf
+    # sort by perf
+    sorted_map = sorted(cp_map.items(), key=lambda x: x[1], reverse=True)  # a sorted list of tuples
+    sorted_id_list = [sorted_map[i][0] for i in range(len(id_list))]  # extract the ids into a list
+    return sorted_id_list
+
+
+def select_clients_CFCFM(make_ids, last_round_pick_ids, clients_perf_vec, cross_rounders, quota):
     """
     Select clients to aggregate their models according to Compensatory First-Come-First-Merge principle.
     :param make_ids: ids of clients finishing their training this round
     :param last_round_pick_ids: ids of clients picked last round, low priority in this round
-    :param clients_perf_vec: clients' performances
+    :param clients_perf_vec: global clients' performances
+    :param cross_rounders: ids of clients inherently cannot finish before max round interval
     :param quota: number of clients to draw this round
     :return: ids of selected clients
     """
-    if len(make_ids) <= quota:  # if not enough well-progress clients to meet the quota
-        return copy.deepcopy(make_ids)
-
     picks = []
-    cp_make_ids = copy.deepcopy(make_ids)  # keep the original copy of make_ids
-    # priority to clients not picked last round ("Compensatory")
-    for id in make_ids:
-        if id not in last_round_pick_ids:  # not picked last round, including crashed and undrafted
-            picks.append(id)  # pick it
-            cp_make_ids.remove(id)
-            if len(picks) >= quota:  # quota met
-                return picks
-
-    # the rest are picked by order of performance ("FCFM")
-    cp_map = {}  # client-perf-map
-    for id in cp_make_ids:
-        cp_map[id] = clients_perf_vec[id]  # build the map
-    # sort by performance
-    sorted_map = sorted(cp_map.items(), key=lambda x: x[1], reverse=True)
-
-    # start picking, FCFM
-    for i in range(min(quota - len(picks), len(cp_map))):
-        picks.append(sorted_map[i][0])
+    # leave cross-rounders undrafted
+    in_time_make_ids = [m_id for m_id in make_ids if m_id not in cross_rounders]  # in-time make ids
+    high_priority_ids = [h_id for h_id in in_time_make_ids if h_id not in last_round_pick_ids]  # compensatory priority
+    low_priority_ids = [l_id for l_id in in_time_make_ids if l_id in last_round_pick_ids]
+    print(high_priority_ids)
+    print(low_priority_ids)
+    # case 0: clients finishing in time not enough for fraction C, just gather them all
+    if len(in_time_make_ids) <= quota:  # if not enough well-progress clients to meet the quota
+        return copy.deepcopy(in_time_make_ids)
+    # case 1: # of priority ids > quota
+    if len(high_priority_ids) >= quota:
+        sorted_priority_ids = sort_ids_by_perf_desc(high_priority_ids, clients_perf_vec)
+        picks = sorted_priority_ids[0:int(quota)]
+    # case 2: # of priority ids <= quota
+    # the rest are picked by order of performance ("FCFM"), lowest batch overhead first
+    else:
+        picks += high_priority_ids  # they have priority
+        # FCFM
+        sorted_low_priority_ids = sort_ids_by_perf_desc(low_priority_ids, clients_perf_vec)
+        for i in range(min(quota - len(picks), len(sorted_low_priority_ids))):
+            picks.append(sorted_low_priority_ids[i])
 
     return picks
 
@@ -113,6 +140,8 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
         # mini-batch GD
         print('\n> Batch #', batch_id, 'on', client.id)
         print('>   model_id = ', model_id)
+
+        # ts = time.time_ns() / 1000000.0  # ms
         model = models[model_id]
         optimizer = optimizers[model_id]
         # gradient descent procedure
@@ -123,6 +152,8 @@ def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, ver
         loss.backward()
         # weights
         optimizer.step()
+        # te = time.time_ns() / 1000000.0   # ms
+        # print('> T_batch = ', te-ts)
 
         # display
         print('>   batch loss = ', loss.item())  # avg. batch loss
@@ -321,9 +352,9 @@ def version_filter(versions, the_ids, base_v, lag_tolerant=1):
     return good_ids, deprecated_ids
 
 
-def distribute_to_local(global_model, models, make_ids):
+def distribute_models(global_model, models, make_ids):
     """
-    Distribute the global model to local clients
+    Distribute the global model
     :param global_model: aggregated global model
     :param models: local models
     :param make_ids: ids of clients that will replace their local models with the global one
@@ -365,7 +396,7 @@ def safa_aggregate(models, local_shards_sizes, data_size):
 
 
 def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
-                clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, max_round_interval, lag_t=1):
+                clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, response_time_limit, lag_t=1):
     """
     Run FL with SAFA algorithm
     :param env_cfg: environment config
@@ -376,11 +407,11 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     :param fed_loader_train: federated training set
     :param fed_loader_test: federated test set
     :param client_shard_sizes: sizes of clients' shards
-    :param clients_perf_vec: performance values of clients
+    :param clients_perf_vec: batch overhead values of clients
     :param clients_crash_prob_vec: crash probs of clients
     :param crash_trace: simulated crash trace
     :param progress_trace: simulated progress trace
-    :param max_round_interval: maximum round interval
+    :param response_time_limit: maximum round interval
     :param lag_t: tolerance of lag
     :return:
     """
@@ -388,7 +419,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     global_model = glob_model  # the global model
     models = [None for _ in range(env_cfg.n_clients)]  # local models
     client_ids = list(range(env_cfg.n_clients))
-    distribute_to_local(global_model, models, client_ids)  # init local models
+    distribute_models(global_model, models, client_ids)  # init local models
     # global cache, storing models to merge before aggregation and latest models after aggregation.
     cache = None  # cache will be initiated in the very first epoch
 
@@ -406,13 +437,16 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     acc_trace = []
 
     # Counters
-    # 1. Global timers, 1 unit = # of batches / client performance, where performance is defined as batch efficiency
+    # 1. Global timers, sum over all rounds
     global_timer = 0.0
+    global_T_dist_timer = 0.0
     # 2. Client timers - record work time of each client
     client_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
-    client_round_timers = []  # in current round
-    picked_client_round_timers = []  # in current round, we need to wait them
+    client_comm_timers = [0.0 for _ in range(env_cfg.n_clients)]  # comm. totally
     # 3. Futile counters - progression (i,e, work time) in vain caused by denial
+    clients_est_round_T_train = np.array(client_shard_sizes) / env_cfg.batch_size * env_cfg.n_epochs / np.array(
+        clients_perf_vec)
+    cross_rounders = get_cross_rounders(clients_est_round_T_train, response_time_limit)
     picked_ids = []
     client_futile_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
     eu_count = 0.0  # effective updates count
@@ -428,15 +462,16 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     for rd in range(env_cfg.n_rounds):
         print('\n> Round #%d' % rd)
         # reset timers
-        client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
-        picked_client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
+        client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]  # local time in current round
+        client_round_comm_timers = [0.0 for _ in range(env_cfg.n_clients)]  # local comm. time in current round
+        picked_client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]  # the picked clients to wait
         # randomly pick a specified fraction of clients to launch training
         quota = math.ceil(env_cfg.n_clients * env_cfg.pick_pct)  # the quota
         # simulate device or network failure
         crash_ids = crash_trace[rd]
         make_ids = [c_id for c_id in range(env_cfg.n_clients) if c_id not in crash_ids]
         # compensatory first-come-first-merge selection, last-round picks are considered low priority
-        picked_ids = select_clients_CFCFM(make_ids, picked_ids, clients_perf_vec, quota)
+        picked_ids = select_clients_CFCFM(make_ids, picked_ids, clients_perf_vec, cross_rounders, quota)
         # also record well-progressed but undrafted ones
         undrafted_ids = [c_id for c_id in make_ids if c_id not in picked_ids]
         # tracing
@@ -449,17 +484,17 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
 
         # distributing step
         # distribute the global model to the edge in a discriminative manner
-        print('>   @Cloud> dispatching global model to the edge')
+        print('>   @Cloud> distributing global model')
         good_ids, deprecated_ids = version_filter(versions, client_ids, rd - 1, lag_tolerant=lag_t)  # find deprecated
         latest_ids, straggler_ids = version_filter(versions, good_ids, rd - 1, lag_tolerant=0)  # find latest/straggled
         # case 1: deprecated clients
-        distribute_to_local(global_model, models, deprecated_ids)  # deprecated clients are forced to sync. (sync.)
+        distribute_models(global_model, models, deprecated_ids)  # deprecated clients are forced to sync. (sync.)
         update_cloud_cache_deprecated(cache, global_model, deprecated_ids)  # replace deprecated entries in cache
         deprecated_trace.append(deprecated_ids)
         print('>   @Cloud> Deprecated clients (forced to sync.):', get_versions(deprecated_ids, versions))
         update_versions(versions, deprecated_ids, rd-1)  # no longer deprecated
         # case 2: latest clients
-        distribute_to_local(global_model, models, latest_ids)  # up-to-version clients will sync. (sync.)
+        distribute_models(global_model, models, latest_ids)  # up-to-version clients will sync. (sync.)
         # case 3: non-deprecated stragglers
         # Moderately straggling clients remain unsync.
         # for 1. saving of downloading bandwidth, and 2. reservation of their potential progress (async.)
@@ -480,16 +515,16 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
             # add to trace
             epoch_train_trace.append(
                 np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
-            print('>   @Edge> %d clients train loss vector this epoch:' % env_cfg.n_clients,
-                  np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
+            # print('>   @Edge> %d clients train loss vector this epoch:' % env_cfg.n_clients,
+            #       np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
             # local test reports
             reporting_test_loss_vec = local_test(models, make_ids, task_cfg, env_cfg, cm_map, fed_loader_test,
                                                  reporting_test_loss_vec)
             # add to trace
             epoch_test_trace.append(
                 np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
-            print('>   @Edge> %d clients test loss vector this epoch:' % env_cfg.n_clients,
-                  np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
+            # print('>   @Edge> %d clients test loss vector this epoch:' % env_cfg.n_clients,
+            #       np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
 
         # Aggregation step
         # discriminative update of cloud cache and aggregate
@@ -530,16 +565,25 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
         # update timers
         for c_id in range(env_cfg.n_clients):
             if c_id in make_ids:
-                # time = # of batches run / perf
-                client_round_timers[c_id] = client_shard_sizes[c_id] / env_cfg.batch_size * env_cfg.n_epochs \
-                                            / clients_perf_vec[c_id]
-                client_timers[c_id] += client_round_timers[c_id]
+                # client_local_round time T(k) = T_download(k) + T_train(k) + T_upload(k), where
+                #   T_comm(k) = T_download(k) + T_upload(k) = 2* model_size / bw_k
+                #   T_train = number of batches / client performance
+                T_comm = 2*task_cfg.model_size / env_cfg.bw_set[0]
+                T_train = client_shard_sizes[c_id] / env_cfg.batch_size * env_cfg.n_epochs / clients_perf_vec[c_id]
+                print('train time and comm. time locally:', T_train, T_comm)
+                # timers
+                client_round_timers[c_id] = T_comm + T_train   # including comm. and training
+                client_round_comm_timers[c_id] = T_comm  # comm. is part of the run time
+                client_timers[c_id] += client_round_timers[c_id]  # sum up
+                client_comm_timers[c_id] += client_round_comm_timers[c_id]  # sum up
                 if c_id in picked_ids:
                     picked_client_round_timers[c_id] = client_round_timers[c_id]  # we need to wait the picked
                 if c_id in deprecated_ids:  # deprecated clients, forced to sync. at distributing step
                     client_futile_timers[c_id] += progress_trace[rd][c_id] * client_round_timers[c_id]
-        round_time = max_round_interval if len(make_ids) < quota else max(picked_client_round_timers)  # w8 to meet quota
-        global_timer += round_time
+        dist_time = task_cfg.model_size * sync_count / env_cfg.bw_set[1]  # T_disk = model_size * N_sync / BW
+        round_response_time = min(response_time_limit, max(picked_client_round_timers))  # w8 to meet quota
+        global_timer += dist_time + round_response_time
+        global_T_dist_timer += dist_time
 
         print('> Round client run time:', client_round_timers)  # round estimated finish time
 
@@ -553,7 +597,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
 
     # display timers
     print('\n> Experiment stats')
-    print('> Clients run time:', client_timers)
+    print('> Clients round time:', client_timers)
     print('> Clients futile run time:', client_futile_timers)
     futile_pcts = (np.array(client_futile_timers) / np.array(client_timers)).tolist()
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
@@ -564,14 +608,15 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     version_var = version_var/env_cfg.n_rounds
     print('> VV:', version_var)
     print('> Total time consumption:', global_timer)
+    print('> Total distribution time (T_dist):', global_T_dist_timer)
     print('> Loss = %.6f/at Round %d:' % (best_loss, best_rd))
 
     # Logging
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     round_trace, acc_trace, make_trace, pick_trace, crash_trace, deprecated_trace,
-                    client_timers, client_futile_timers, global_timer, eu_ratio, sync_ratio, version_var,
-                    best_rd, best_loss, extra_args={'lag_tolerance': lag_t}, log_loss_traces=False)
+                    client_timers, client_futile_timers, global_timer, global_T_dist_timer, eu_ratio, sync_ratio,
+                    version_var, best_rd, best_loss, extra_args={'lag_tolerance': lag_t}, log_loss_traces=False)
 
     return best_model, best_rd, best_loss
 
@@ -587,6 +632,11 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
 # print(latest_ids)
 # print(straggler_ids)
 # exit(0)
+# ids =  [0,1,2,3,4]
+# perf = [0,10,20,30,40]
+# last_picks = [2,4]
+# makes = [1,2,3,4]
+# print(select_clients_CFCFM(makes,last_picks,perf,[0,1],quota=5))
 
 
 

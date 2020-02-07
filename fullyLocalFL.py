@@ -13,7 +13,7 @@ import os
 import math
 import random
 import numpy as np
-import syft as sy
+# import syft as sy
 import matplotlib.pyplot as plt
 from learning_tasks import MLmodelReg, MLmodelCNN
 from learning_tasks import MLmodelSVM
@@ -398,7 +398,7 @@ def run_fullyLocal(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     [overall_loss], [final_acc], make_trace, pick_trace, crash_trace, None,
-                    client_timers, client_futile_timers, global_timer, eu_ratio, sync_ratio, 0.0,
+                    client_timers, client_futile_timers, global_timer, 0.0, eu_ratio, sync_ratio, 0.0,
                     best_rd, best_loss, extra_args=None, log_loss_traces=False)
 
     return best_model, best_rd, best_loss

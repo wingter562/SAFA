@@ -9,7 +9,7 @@ import os
 import random
 import numpy as np
 import torch
-import syft as sy
+# import syft as sy
 import matplotlib.pyplot as plt
 from sklearn import datasets
 import FLLocalSupport as FLSup
@@ -80,8 +80,8 @@ def inspect_model(model):
 
 def log_stats(f_name, env_cfg, task_cfg, detail_env,
               epoch_train_trace, epoch_test_trace, round_trace, acc_trace, make_trace, pick_trace, crash_trace,
-              deprecate_trace, client_timers, client_futile_timers, global_timer, eu_ratio, sync_ratio, version_var,
-              best_rd, best_loss, extra_args=None, log_loss_traces=True):
+              deprecate_trace, client_timers, client_futile_timers, global_timer, global_T_dist_timer,eu_ratio,
+              sync_ratio, version_var, best_rd, best_loss, extra_args=None, log_loss_traces=True):
     """
     Save experiment results into a log file
     :param f_name: log file name
@@ -99,6 +99,7 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
     :param client_timers: client run time
     :param client_futile_timers: client futile run time
     :param global_timer: global run time
+    :param global_T_dist_timer: global distribution time
     :param eu_ratio: Effective Update ratio
     :param sync_ratio: Sync. Ratio
     :param version_var: Version variance
@@ -120,7 +121,8 @@ def log_stats(f_name, env_cfg, task_cfg, detail_env,
         print('EUR: %.6f' % eu_ratio)
         print('SR: %.6f' % sync_ratio)
         print('VV: %.6f' % version_var)
-        print('Total time consumption:', global_timer)
+        print('Avg. round length:', global_timer/env_cfg.n_rounds)
+        print('Avg. T_dist:', global_T_dist_timer/env_cfg.n_rounds)
         if log_loss_traces:
             print('> Loss traces')
             print('Client train trace:', epoch_train_trace)
@@ -299,7 +301,7 @@ def fetch_KddCup99_10pct_tcpdump(return_X_y=False):
         return tcp_data_mat
 
 
-def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cfg, clients):
+def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cfg, clients, from_file=None):
     """
     Build federated data sets for a number of n_clients
     :param data_train_x: training data X to split
@@ -308,6 +310,7 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
     :param data_test_y: test data Y to split
     :param env_cfg: environment config file
     :param clients: client objects
+    :param from_file: read a existing data partition scheme from local file instead of generating
     :return: FLFedDataset of training data, FLFedDataset of test data, and a list of sizes of shards
     """
     dev = env_cfg.device
@@ -399,6 +402,18 @@ def get_FL_datasets(data_train_x, data_train_y, data_test_x, data_test_y, env_cf
     else:
         print('Error> Invalid data distribution option')
         exit(0)
+
+
+    # if from file
+    if from_file:
+        split_points_train = (np.loadtxt(from_file) * train_size).astype(int)
+        split_points_test = (np.loadtxt(from_file) * test_size).astype(int)
+        client_shards_sizes[0] = split_points_train[0] + split_points_test[0]
+        for k in range(1, env_cfg.n_clients):
+            train_shards = split_points_train[k] - split_points_train[k-1]
+            test_shards = split_points_train[k] - split_points_train[k-1]
+            client_shards_sizes.append(train_shards+test_shards)
+
     # split data and dispatch
     for i in range(env_cfg.n_clients):
         # prepare client data, train and test separately

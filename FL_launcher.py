@@ -15,13 +15,14 @@ import gc
 import time
 import random
 import numpy as np
-import syft as sy
+# import syft as sy
 from sklearn import datasets as sk_datasets
 from sklearn.svm import SVC
 import FLLocalSupport as FLSup
 import fullyLocalFL
 import primal_FedAvg
 import semiAysnc_FedAvg
+import FedCS_Nishio
 from learning_tasks import MLmodelReg, MLmodelCNN
 from learning_tasks import MLmodelSVM
 import utils
@@ -53,10 +54,11 @@ class EnvSettings:
         keep_best: keep so-far best global model if True, otherwise update anyway after aggregation
         dev: running device
         showplot: plot and show round trace
+        bw_set: bandwidth setting = (bw_d, bw_u, bw_server)
     """
     def __init__(self, n_clients=3, n_rounds=3, n_epochs=1, batch_size=1, train_pct=0.7, sf=False,
                  pick_pct=1.0, data_dist=None, perf_dist=None, crash_dist=None, keep_best=False, dev='cpu',
-                 showplot=False):
+                 showplot=False, bw_set=None, max_T=None):
         self.mode = None
         self.n_clients = n_clients
         self.n_rounds = n_rounds
@@ -74,6 +76,8 @@ class EnvSettings:
 
         self.keep_best = keep_best
         self.showplot = showplot
+        self.bw_set = bw_set
+        self.max_T = max_T
 
         # runtime
         if dev == 'cpu':
@@ -95,7 +99,8 @@ class TaskSettings:
         lr: learning rate
         lr_decay: learning rate decay per round
     """
-    def __init__(self, task_type, dataset, path, in_dim, out_dim, optimizer='SGD', loss=None, lr=0.01, lr_decay=1.0):
+    def __init__(self, task_type, dataset, path, in_dim, out_dim, optimizer='SGD',
+                 loss=None, lr=0.01, lr_decay=1.0):
         self.task_type = task_type
         self.dataset = dataset
         self.path = path
@@ -105,6 +110,7 @@ class TaskSettings:
         self.loss = loss
         self.lr = lr
         self.lr_decay = lr_decay
+        self.model_size = 10.0  # 10MB
 
 
 def save_KddCup99_tcpdump_tcp_tofile(fpath):
@@ -123,46 +129,46 @@ def save_KddCup99_tcpdump_tcp_tofile(fpath):
                       'dst_host_srv_diff_host_rate, dst_host_serror_rate, dst_host_srv_serror_rate, '
                       'dst_host_rerror_rate, dst_host_srv_rerror_rate, label')
 
+# deprecated
+# def init_syft_clients(nc, hook):
+#     """
+#     # Create clients and a client-index map
+#     :param nc:  # of clients
+#     :param hook:  Syft hook
+#     :return: clients list, and a client-index map
+#     """
+#     clients = []
+#     c_name2idx = {}
+#     for i in range(nc):
+#         clients.append(sy.VirtualWorker(hook, id='client_' + str(i)))
+#         c_name2idx['client_' + str(i)] = i  # client i with model i
+#     return clients, c_name2idx
 
-def init_syft_clients(nc, hook):
-    """
-    # Create clients and a client-index map
-    :param nc:  # of clients
-    :param hook:  Syft hook
-    :return: clients list, and a client-index map
-    """
-    clients = []
-    c_name2idx = {}
-    for i in range(nc):
-        clients.append(sy.VirtualWorker(hook, id='client_' + str(i)))
-        c_name2idx['client_' + str(i)] = i  # client i with model i
-    return clients, c_name2idx
-
-
-def clear_syft_memory_and_reinit(fed_data_train, fed_data_test, env_cfg, hook):
-    """
-    Clear syft memory leakage by deleting and re-initializing all client objects and corresponding data sets
-    :param fed_data_train: FederatedDataSet of training
-    :param fed_data_test: FederatedDataSet of test
-    :param env_cfg: environment config
-    :param hook: Pysyft hook
-    :return: new clients, FederatedDataLoader of training and test data
-    """
-    # init new client objects
-    clients, c_name2idx = init_syft_clients(env_cfg.n_clients, hook)
-
-    # rebuild FederatedDatasets and Loaders
-    # train set
-    for c, d in fed_data_train.datasets.items():
-        d.get()
-        d.send(clients[c_name2idx[c]])  # bind data to newly-built clients
-    for c, d in fed_data_test.datasets.items():
-        d.get()
-        d.send(clients[c_name2idx[c]])
-    fed_loader_train = sy.FederatedDataLoader(fed_data_train, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
-    fed_loader_test = sy.FederatedDataLoader(fed_data_test, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
-
-    return clients, fed_loader_train, fed_loader_test
+# deprecated
+# def clear_syft_memory_and_reinit(fed_data_train, fed_data_test, env_cfg, hook):
+#     """
+#     Clear syft memory leakage by deleting and re-initializing all client objects and corresponding data sets
+#     :param fed_data_train: FederatedDataSet of training
+#     :param fed_data_test: FederatedDataSet of test
+#     :param env_cfg: environment config
+#     :param hook: Pysyft hook
+#     :return: new clients, FederatedDataLoader of training and test data
+#     """
+#     # init new client objects
+#     clients, c_name2idx = init_syft_clients(env_cfg.n_clients, hook)
+#
+#     # rebuild FederatedDatasets and Loaders
+#     # train set
+#     for c, d in fed_data_train.datasets.items():
+#         d.get()
+#         d.send(clients[c_name2idx[c]])  # bind data to newly-built clients
+#     for c, d in fed_data_test.datasets.items():
+#         d.get()
+#         d.send(clients[c_name2idx[c]])
+#     fed_loader_train = sy.FederatedDataLoader(fed_data_train, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
+#     fed_loader_test = sy.FederatedDataLoader(fed_data_test, shuffle=env_cfg.shuffle, batch_size=env_cfg.batch_size)
+#
+#     return clients, fed_loader_train, fed_loader_test
 
 
 def init_FL_clients(nc):
@@ -230,13 +236,13 @@ def init_glob_model(env_cfg, task_cfg):
 
 def generate_clients_perf(env_cfg, from_file=False):
     """
-    Generate a series of client performance values (in virtual time unit) following specified distribution
+    Generate a series of client performance values (in virtual time unit) following the specified distribution
     :param env_cfg: environment config file
     :param from_file: if True, load client performance distribution from file
     :return: a list of client's performance, measured in virtual unit
     """
     if from_file:
-        fname = 'gen/clients_perf_'+ str(env_cfg.n_clients)
+        fname = 'gen/clients_perf_'+str(env_cfg.n_clients)
         return np.loadtxt(fname)
 
     n_clients = env_cfg.n_clients
@@ -365,27 +371,29 @@ def main():
     lag_tol = int(sys.argv[2])  # lag tolerance, for SAFA
     pick_C = float(sys.argv[3])  # pick percent, for FedAvg and SAFA
 
-    # hook = sy.TorchHook(torch)  # hook PyTorch with PySyft to support Federated Learning
+    # hook = sy.TorchHook(torch)  # no support for GPU and torch 1.3 from PySyft yet
+    # communication settings, client throughput = 1.4Mbs suggested by FedCS, server bandwidth = 10Gbs
+    bw_set = (0.175, 1250)  # (client throughput, bandwidth_server) in MB/s
     ''' Boston housing regression settings (ms per epoch)'''
     ''' https://archive.ics.uci.edu/ml/machine-learning-databases/housing/ '''
-    env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
-                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-                          keep_best=True, dev='cpu', showplot=False)
-    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
+    # env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
+    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+    #                       keep_best=True, dev='cpu', showplot=False, bw_set=bw_set, max_T=830)
+    # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
+    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
     ''' MNIST digits classification task settings (3s per epoch on GPU)'''
     # env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
     #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-    #                       keep_best=True, dev='gpu', showplot=False)
+    #                       keep_best=True, dev='gpu', showplot=False, bw_set=bw_set, max_T=5600)
     # task_cfg = TaskSettings(task_type='CNN', dataset='mnist', path='data/MNIST/',
     #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
     ''' KddCup99 tcpdump SVM classification settings (~0.3s per epoch on CPU, optimized)'''
     ''' https://kdd.ics.uci.edu/databases/kddcup99/kddcup99.html '''
-    # env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
-    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-    #                       keep_best=True, dev='cpu', showplot=False)
-    # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
-    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
+    env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
+                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+                          keep_best=True, dev='cpu', showplot=False, bw_set=bw_set, max_T=1620)
+    task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
+                            in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
 
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
 
@@ -443,13 +451,15 @@ def main():
     print('> %d clients data shards (data_dist = %s):' % (env_cfg.n_clients, env_cfg.data_dist[0]), client_shard_sizes)
 
     # prepare simulation
-    # clients performance
+    # client performance = # of mini-batched able to process in one second
     clients_perf_vec = generate_clients_perf(env_cfg, from_file=True)
 
     print('> Clients perf vec:', clients_perf_vec)
-    # max round interval is reached when any crash occurs
-    max_round_interval = max(
-        env_cfg.n_epochs / env_cfg.batch_size * np.array(client_shard_sizes) / np.array(clients_perf_vec))
+    # Maximum waiting time for clients' response in a round setting
+    clients_est_round_T_train = np.array(client_shard_sizes) / env_cfg.batch_size * env_cfg.n_epochs / np.array(
+        clients_perf_vec)
+    response_time_limit = env_cfg.max_T if env_cfg.max_T else max(clients_est_round_T_train)+2*task_cfg.model_size/bw_set[0]
+
     # client crash probability
     clients_crash_prob_vec = generate_clients_crash_prob(env_cfg)
     print('> Clients crash prob. vec:', clients_crash_prob_vec)
@@ -457,7 +467,7 @@ def main():
     crash_trace, progress_trace = generate_crash_trace(env_cfg, clients_crash_prob_vec)
 
     # launching
-    # specify learning task, for Fully Local training
+    # # specify learning task, for Fully Local training
     # glob_model = init_glob_model(env_cfg, task_cfg)
     # print('> Launching Fully Local FL...')
     # # run FL with Fully local training
@@ -465,9 +475,9 @@ def main():
     # best_model, best_rd, final_loss = fullyLocalFL. \
     #     run_fullyLocal(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
     #                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
-    #                    max_round_interval)
+    #                    response_time_limit)
 
-    # reinitialize, for FedAvg
+    # # reinitialize, for FedAvg
     # glob_model = init_glob_model(env_cfg, task_cfg)
     # print('> Launching FedAvg FL...')
     # # run FL with FedAvg
@@ -475,25 +485,39 @@ def main():
     # best_model, best_rd, final_loss = primal_FedAvg. \
     #     run_FL(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
     #            client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
-    #            max_round_interval)
+    #            response_time_limit)
 
     # reinitialize, for SAFA
     glob_model = init_glob_model(env_cfg, task_cfg)
     # lag_tol = get_empirical_lat_t(task_cfg, env_cfg)
-    print('> Launching SAFA-FL (lag tolerance = %d)' % lag_tol)
+    print('> Launching SAFA-FL (lag tolerance = %d)...' % lag_tol)
     # run FL with SAFA
     env_cfg.mode = 'Semi-Async. FedAvg'
     best_model, best_rd, final_loss = semiAysnc_FedAvg. \
         run_FL_SAFA(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
                     client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
-                    max_round_interval, lag_t=lag_tol)
+                    response_time_limit, lag_t=lag_tol)
+
+    # reinitialize, for FedCS
+    glob_model = init_glob_model(env_cfg, task_cfg)
+    print('> Launching FedCS...')
+    # run FL with FedCS
+    env_cfg.mode = 'FedCS_Nishio'
+    best_model, best_rd, final_loss = FedCS_Nishio. \
+        run_FedCS(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+                  client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+                  response_time_limit)
 
 
 # test area
 # m = MLmodelCNN(10).to(torch.device('cuda'))
 # print(next(m.parameters()).is_cuda)
 # exit(0)
+# fname = 'gen/clients_perf_500'
+    # perfs = np.loadtxt(fname)
+    # bo = perfs*0.05  # fully-connected, N(50ms)
+    # # bo = perfs*0.3  # CNN, N(300ms)
+    # np.savetxt('gen/clients_bo_FCN_500', bo)
 
 if __name__ == '__main__':
     main()
-

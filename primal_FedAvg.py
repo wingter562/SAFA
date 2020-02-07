@@ -1,5 +1,5 @@
-# semi-async_FedAvg.py
-# Pytorch+PySyft implementation of the primal Federated Averaging (FedAvg) algorithm for Federated Learning,
+# primal_FedAvg.py
+# Pytorch+PySyft implementation of the primitive Federated Averaging (FedAvg) algorithm for Federated Learning,
 # proposed by:
 # [] McMahan, B., Moore, E., Ramage, D., Hampson, S., & y Arcas, B. A. (2017, April). Communication-Efficient Learning
 #   of Deep Networks from Decentralized Data. In Artificial Intelligence and Statistics, vol. 54, pp. 1273-1282.
@@ -15,7 +15,7 @@ import os
 import math
 import random
 import numpy as np
-import syft as sy
+# import syft as sy
 import matplotlib.pyplot as plt
 from learning_tasks import MLmodelReg, MLmodelCNN
 from learning_tasks import MLmodelSVM
@@ -202,9 +202,9 @@ def global_test(model, task_cfg, env_cfg, cm_map, fdl):
     return test_sum_loss_vec, acc/count
 
 
-def distribute_to_local(global_model, models, make_ids):
+def distribute_models(global_model, models, make_ids):
     """
-    Distribute the global model to local clients
+    Distribute the global model
     :param global_model: aggregated global model
     :param models: local models
     :param make_ids: ids of clients that will replace their local models with the global one
@@ -245,8 +245,16 @@ def aggregate(models, local_shards_sizes, data_size):
     return global_model
 
 
+def get_cross_rounders(clients_est_round_T_train, max_round_interval):
+    cross_rounder_ids = []
+    for c_id in range(len(clients_est_round_T_train)):
+        if clients_est_round_T_train[c_id] > max_round_interval:
+            cross_rounder_ids.append(c_id)
+    return cross_rounder_ids
+
+
 def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, fed_loader_test, client_shard_sizes,
-           clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, round_interval):
+           clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace, response_time_limit):
     """
     Primal implementation of FedAvg for FL
     :param env_cfg:
@@ -261,14 +269,14 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
     :param clients_crash_prob_vec:
     :param crash_trace:
     :param progress_trace:
-    :param round_interval:
+    :param response_time_limit:
     :return:
     """
     # init
     global_model = glob_model  # the global model
     models = [None for _ in range(env_cfg.n_clients)]  # local models
     client_ids = list(range(env_cfg.n_clients))
-    distribute_to_local(global_model, models, client_ids)  # init local models
+    distribute_models(global_model, models, client_ids)  # init local models
 
     # traces
     reporting_train_loss_vec = [0 for _ in range(env_cfg.n_clients)]
@@ -283,10 +291,14 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
     # Counters
     # 1. Global timers, 1 unit = # of batches / client performance, where performance is defined as batch efficiency
     global_timer = 0.0
+    global_T_dist_timer = 0.0
     # 2. Client timers - record work time of each client
     client_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
-    client_round_timers = []  # in current round
+    client_comm_timers = [0.0 for _ in range(env_cfg.n_clients)]  # comm. totally
     # 3. Futile counters - progression (i,e, work time) in vain caused by local crashes
+    clients_est_round_T_train = np.array(client_shard_sizes) / env_cfg.batch_size * env_cfg.n_epochs / np.array(
+        clients_perf_vec)
+    cross_rounders = get_cross_rounders(clients_est_round_T_train, response_time_limit)
     client_futile_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
     eu_count = 0.0  # effective updates count
     sync_count = 0.0  # synchronization count
@@ -300,51 +312,53 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
     for rd in range(env_cfg.n_rounds):
         print('\n> Round #%d' % rd)
         # reset timers
-        client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]
+        client_round_timers = [0.0 for _ in range(env_cfg.n_clients)]  # local time in current round
+        client_round_comm_timers = [0.0 for _ in range(env_cfg.n_clients)]  # local comm. time in current round
         # randomly pick a specified fraction of clients to launch training
         n_picks = math.ceil(env_cfg.n_clients * env_cfg.pick_pct)
-        picked_ids = random.sample(range(env_cfg.n_clients), n_picks)
-        picked_ids.sort()
-        pick_trace.append(picked_ids)  # tracing
-        print('> Clients selected: ', picked_ids)
+        selected_ids = random.sample(range(env_cfg.n_clients), n_picks)
+        selected_ids.sort()
+        pick_trace.append(selected_ids)  # tracing
+        print('> Clients selected: ', selected_ids)
         # simulate device or network failure
         crash_ids = crash_trace[rd]
         client_round_progress = progress_trace[rd]
-        make_ids = [c_id for c_id in picked_ids if c_id not in crash_ids]
+        submit_ids = [c_id for c_id in selected_ids if c_id not in crash_ids and c_id not in cross_rounders]
         # tracing
-        make_trace.append(make_ids)
-        eu_count += len(make_ids)  # count effective updates
+        make_trace.append(submit_ids)
+        eu_count += len(submit_ids)  # count effective updates
         print('> Clients crashed: ', crash_ids)
 
-        # distributing step: broadcast
-        print('>   @Cloud> dispatching global model to the edge')
-        distribute_to_local(global_model, models, client_ids)
-        sync_count += len(client_ids)  # count sync. overheads
+        # distributing step: broadcast (for non-selected clients, just update their cache entry on the cloud
+        # so as to have all models share initialization upon aggregation for loss reduction)
+        print('>   @Cloud> distributing global model')
+        distribute_models(global_model, models, client_ids)
+        sync_count += len(selected_ids)  # count sync. overheads
 
         # Local training step
         for epo in range(env_cfg.n_epochs):  # local epochs (same # of epochs for each client)
             print('\n> @Edge> local epoch #%d' % epo)
             # invoke mini-batch training on selected clients, from the 2nd epoch
             if rd + epo == 0:  # 1st epoch all-in to get start points
-                bak_make_ids = copy.deepcopy(make_ids)
-                make_ids = list(range(env_cfg.n_clients))
+                bak_make_ids = copy.deepcopy(submit_ids)
+                submit_ids = list(range(env_cfg.n_clients))
             elif rd == 0 and epo == 1:  # resume
-                make_ids = bak_make_ids
-            reporting_train_loss_vec = train(models, make_ids, env_cfg, cm_map, fed_loader_train, task_cfg,
+                submit_ids = bak_make_ids
+            reporting_train_loss_vec = train(models, submit_ids, env_cfg, cm_map, fed_loader_train, task_cfg,
                                              reporting_train_loss_vec, verbose=False)
             # add to trace
             epoch_train_trace.append(
                 np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
-            print('>   @Edge> %d clients train loss vector this epoch:' % env_cfg.n_clients,
-                  np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
+            # print('>   @Edge> %d clients train loss vector this epoch:' % env_cfg.n_clients,
+            #       np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
             # local test reports
-            reporting_test_loss_vec = local_test(models, task_cfg, env_cfg, make_ids, env_cfg.n_clients, cm_map,
+            reporting_test_loss_vec = local_test(models, task_cfg, env_cfg, submit_ids, env_cfg.n_clients, cm_map,
                                                  fed_loader_test, reporting_test_loss_vec)
             # add to trace
             epoch_test_trace.append(
                 np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
-            print('>   %d @Edge> clients test loss vector this epoch:' % env_cfg.n_clients,
-                  np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
+            # print('>   %d @Edge> clients test loss vector this epoch:' % env_cfg.n_clients,
+            #       np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
 
         # Aggregation step
         print('\n> Aggregation step (Round #%d)' % rd)
@@ -372,15 +386,23 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
 
         # update timers
         for c_id in range(env_cfg.n_clients):
-            if c_id in picked_ids:
-                # time = # of batches run / perf
-                client_round_timers[c_id] = client_shard_sizes[c_id] / env_cfg.batch_size * env_cfg.n_epochs \
-                                            / clients_perf_vec[c_id]
-                client_timers[c_id] += client_round_timers[c_id]
+            if c_id in selected_ids:  # only compute timers for the selected
+                # client_local_round time T(k) = T_download(k) + T_train(k) + T_upload(k), where
+                #   T_comm(k) = T_download(k) + T_upload(k) = 2* model_size / bw_k
+                #   T_train = number of batches / client performance
+                T_comm = 2*task_cfg.model_size / env_cfg.bw_set[0]
+                T_train = client_shard_sizes[c_id] / env_cfg.batch_size * env_cfg.n_epochs / clients_perf_vec[c_id]
+                print('train time and comm. time locally:', T_train, T_comm)
+                client_round_timers[c_id] = T_comm + T_train  # including comm. and training
+                client_round_comm_timers[c_id] = T_comm  # comm. is part of the run time
+                client_timers[c_id] += client_round_timers[c_id]  # sum up
+                client_comm_timers[c_id] += client_round_comm_timers[c_id]  # sum up
                 if c_id in crash_ids:  # failed clients
                     client_futile_timers[c_id] += client_round_timers[c_id] * client_round_progress[c_id]
-        round_time = round_interval if len(crash_ids) > 0 else max(client_round_timers)  # fixed interval if crash
-        global_timer += round_time
+        dist_time = task_cfg.model_size * sync_count / env_cfg.bw_set[1]  # T_disk = model_size * N_sync / BW
+        round_response_time = min(response_time_limit, max(client_round_timers))
+        global_timer += dist_time + round_response_time
+        global_T_dist_timer += dist_time
 
         print('> Round client run time:', client_round_timers)  # round estimated finish time
         print('> Round client progress:', client_round_progress)  # round actual progress at last
@@ -402,16 +424,17 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
     print('> Clients futile percent (avg.=%.3f):' % np.mean(futile_pcts), futile_pcts)
     eu_ratio = eu_count/env_cfg.n_rounds/env_cfg.n_clients
     print('> EUR:', eu_ratio)
-    sync_ratio = sync_count / env_cfg.n_rounds / env_cfg.n_clients
+    sync_ratio = env_cfg.pick_pct
     print('> SR:', sync_ratio)
     print('> Total time consumption:', global_timer)
+    print('> Total distribution time (T_dist):', global_T_dist_timer)
     print('> Loss = %.6f/at Round %d:' % (best_loss, best_rd))
 
     # Logging
     detail_env = (client_shard_sizes, clients_perf_vec, clients_crash_prob_vec)
     utils.log_stats('stats/exp_log.txt', env_cfg, task_cfg, detail_env, epoch_train_trace, epoch_test_trace,
                     round_trace, acc_trace, make_trace, pick_trace, crash_trace, None,
-                    client_timers, client_futile_timers, global_timer, eu_ratio, sync_ratio, 0.0,
+                    client_timers, client_futile_timers, global_timer, global_T_dist_timer, eu_ratio, sync_ratio, 0.0,
                     best_rd, best_loss, extra_args=None, log_loss_traces=False)
 
     return best_model, best_rd, best_loss

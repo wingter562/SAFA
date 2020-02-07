@@ -97,7 +97,6 @@ class svmLoss(nn.Module):
         else:
             print('E> Wrong reduction method specified')
 
-    # no need to override backward as L2-norm svm loss is differentiable
 
 
 class MLmodelCNN(nn.Module):
