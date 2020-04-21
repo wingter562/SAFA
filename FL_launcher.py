@@ -234,11 +234,12 @@ def init_glob_model(env_cfg, task_cfg):
     return model
 
 
-def generate_clients_perf(env_cfg, from_file=False):
+def generate_clients_perf(env_cfg, from_file=False, s0=1e-2):
     """
     Generate a series of client performance values (in virtual time unit) following the specified distribution
     :param env_cfg: environment config file
     :param from_file: if True, load client performance distribution from file
+    :param s0: lower bound of performance
     :return: a list of client's performance, measured in virtual unit
     """
     if from_file:
@@ -250,17 +251,21 @@ def generate_clients_perf(env_cfg, from_file=False):
     # Case 1: Equal performance
     if env_cfg.perf_dist[0] == 'E':  # ('E', None)
         perf_vec = [1.0 for _ in range(n_clients)]
+        while np.min(perf_vec) < s0:  # in case of super straggler
+            perf_vec = [1.0 for _ in range(n_clients)]
 
     # Case 2: eXponential distribution of performance
     elif env_cfg.perf_dist[0] == 'X':  # ('X', None), lambda = 1/1, mean = 1
         perf_vec = [random.expovariate(1.0) for _ in range(n_clients)]
+        while np.min(perf_vec) < s0:  # in case of super straggler
+            perf_vec = [random.expovariate(1.0) for _ in range(n_clients)]
 
     # Case 3: Normal distribution of performance
     elif env_cfg.perf_dist[0] == 'N':  # ('N', rlt_sigma), mu = 1, sigma = rlt_sigma * mu
         perf_vec = [0.0 for _ in range(n_clients)]
         for i in range(n_clients):
             perf_vec[i] = random.gauss(1.0, env_cfg.perf_dist[1] * 1.0)
-            while perf_vec[i] <= 0:  # in case of negative
+            while perf_vec[i] <= s0:  # in case of super straggler
                 perf_vec[i] = random.gauss(1.0, env_cfg.perf_dist[1] * 1.0)
     else:
         print('Error> Invalid client performance distribution option')
@@ -452,7 +457,7 @@ def main():
 
     # prepare simulation
     # client performance = # of mini-batched able to process in one second
-    clients_perf_vec = generate_clients_perf(env_cfg, from_file=True)
+    clients_perf_vec = generate_clients_perf(env_cfg, from_file=True)  # generated, s0= 0.05,0.016,0.012 for Task 1,2,3
 
     print('> Clients perf vec:', clients_perf_vec)
     # Maximum waiting time for clients' response in a round setting
