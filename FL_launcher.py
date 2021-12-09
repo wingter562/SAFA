@@ -381,11 +381,11 @@ def main():
     bw_set = (0.175, 1250)  # (client throughput, bandwidth_server) in MB/s
     ''' Boston housing regression settings (ms per epoch)'''
     ''' https://archive.ics.uci.edu/ml/machine-learning-databases/housing/ '''
-    # env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
-    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-    #                       keep_best=True, dev='cpu', showplot=False, bw_set=bw_set, max_T=830)
-    # task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
-    #                         in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
+    env_cfg = EnvSettings(n_clients=5, n_rounds=100, n_epochs=3, batch_size=5, train_pct=0.7, sf=False,
+                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+                          keep_best=True, dev='cpu', showplot=False, bw_set=bw_set, max_T=830)
+    task_cfg = TaskSettings(task_type='Reg', dataset='Boston', path='data/boston_housing.csv',
+                            in_dim=12, out_dim=1, optimizer='SGD', loss='mse', lr=1e-4, lr_decay=1.0)
     ''' MNIST digits classification task settings (3s per epoch on GPU)'''
     # env_cfg = EnvSettings(n_clients=100, n_rounds=50, n_epochs=5, batch_size=40, train_pct=6.0/7.0, sf=False,
     #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
@@ -394,11 +394,11 @@ def main():
     #                         in_dim=None, out_dim=None, optimizer='SGD', loss='nllLoss', lr=1e-3, lr_decay=1.0)
     ''' KddCup99 tcpdump SVM classification settings (~0.3s per epoch on CPU, optimized)'''
     ''' https://kdd.ics.uci.edu/databases/kddcup99/kddcup99.html '''
-    env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
-                          pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
-                          keep_best=True, dev='cpu', showplot=False, bw_set=bw_set, max_T=1620)
-    task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
-                            in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
+    # env_cfg = EnvSettings(n_clients=500, n_rounds=100, n_epochs=5, batch_size=100, train_pct=0.7, sf=False,
+    #                       pick_pct=pick_C, data_dist=('N', 0.3), perf_dist=('X', None), crash_dist=('E', cr_prob),
+    #                       keep_best=True, dev='cpu', showplot=False, bw_set=bw_set, max_T=1620)
+    # task_cfg = TaskSettings(task_type='SVM', dataset='tcpdump99', path='data/kddcup99_tcp.csv',
+    #                         in_dim=35, out_dim=1, optimizer='SGD', loss='svmLoss', lr=1e-2, lr_decay=1.0)
 
     utils.show_settings(env_cfg, task_cfg, detail=False, detail_info=None)
 

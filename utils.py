@@ -15,47 +15,6 @@ from sklearn import datasets
 import FLLocalSupport as FLSup
 
 
-# EventHandler for handling events and altering system states
-class EventHandler:
-    def __init__(self, state_names):
-        """
-        Initialize the states
-        :param state_names: a name list of states
-        """
-        assert state_names is not None
-        # System states stored as key-value pairs
-        self.states = {sn: 0.0 for sn in state_names}
-
-    def get_state(self, state_name):
-        return self.states[state_name]
-
-    def add_sequential(self, state_name, value):
-        """
-        Add a sequential event to the system and handle it
-        by changing a specific state (only additive logic in our case)
-        :param state_name:
-        :param value:
-        :return:
-        """
-        self.states[state_name] += value
-
-    def add_parallel(self, state_name, values, reduce='max'):
-        """
-        Add parallel events to the system and handle it
-        using specific reduce methods of 'max' or 'sum'
-        :param state_name:
-        :param values:
-        :param reduce:
-        :return:
-        """
-        if reduce == 'max':
-            self.states[state_name] += max(values)
-        elif reduce == 'sum':
-            self.states[state_name] += sum(values)
-        else:
-            print('[Error] Wrong reduce method specified.')
-
-
 def set_print_device(dev, f_handle=None):
     """
     # set current print device to dev

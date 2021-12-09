@@ -20,6 +20,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from learning_tasks import MLmodelReg, svmLoss, MLmodelSVM, MLmodelCNN
 import utils
+import FLLocalSupport as FLSup
 
 
 def get_cross_rounders(clients_est_round_T_train, max_round_interval):
@@ -437,7 +438,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     acc_trace = []
 
     # Global event handler
-    event_handler = utils.EventHandler(['time', 'T_dist'])
+    event_handler = FLSup.EventHandler(['time', 'T_dist'])
     # Local counters
     # 1. Local timers - record work time of each client
     client_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally

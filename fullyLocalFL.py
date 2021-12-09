@@ -19,6 +19,7 @@ from learning_tasks import MLmodelReg, MLmodelCNN
 from learning_tasks import MLmodelSVM
 from learning_tasks import svmLoss
 import utils
+import FLLocalSupport as FLSup
 
 
 def train(models, picked_ids, env_cfg, cm_map, fdl, task_cfg, last_loss_rep, verbose=True):
@@ -277,7 +278,7 @@ def run_fullyLocal(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_
     pick_trace = []
 
     # Global event handler
-    event_handler = utils.EventHandler(['time'])
+    event_handler = FLSup.EventHandler(['time'])
     # Local counters
     # 1. Local timers - record work time of each client
     client_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
