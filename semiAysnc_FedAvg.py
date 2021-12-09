@@ -436,14 +436,13 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     round_trace = []
     acc_trace = []
 
-    # Counters
-    # 1. Global timers, sum over all rounds
-    global_timer = 0.0
-    global_T_dist_timer = 0.0
-    # 2. Client timers - record work time of each client
-    client_timers = [0.0 for _ in range(env_cfg.n_clients)]  # totally
+    # Global event handler
+    event_handler = utils.EventHandler(['time', 'T_dist'])
+    # Local counters
+    # 1. Local timers - record work time of each client
+    client_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
     client_comm_timers = [0.0 for _ in range(env_cfg.n_clients)]  # comm. totally
-    # 3. Futile counters - progression (i,e, work time) in vain caused by denial
+    # 2. Futile counters - progression (i,e, work time) in vain caused by denial
     clients_est_round_T_train = np.array(client_shard_sizes) / env_cfg.batch_size * env_cfg.n_epochs / np.array(
         clients_perf_vec)
     cross_rounders = get_cross_rounders(clients_est_round_T_train, response_time_limit)
@@ -452,7 +451,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
     eu_count = 0.0  # effective updates count
     sync_count = 0.0  # synchronization count
     version_var = 0.0
-    # 4. best loss (global)
+    # Best loss (global)
     best_rd = -1
     best_loss = float('inf')
     best_acc = -1.0
@@ -502,7 +501,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
 
         # Local training step
         for epo in range(env_cfg.n_epochs):  # local epochs (same # of epochs for each client)
-            print('\n> @Edge> local epoch #%d' % epo)
+            print('\n> @Devices> local epoch #%d' % epo)
             # invoke mini-batch training on selected clients, from the 2nd epoch
             if rd + epo == 0:  # 1st epoch all-in to get start points
                 bak_make_ids = copy.deepcopy(make_ids)
@@ -515,7 +514,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
             # add to trace
             epoch_train_trace.append(
                 np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
-            # print('>   @Edge> %d clients train loss vector this epoch:' % env_cfg.n_clients,
+            # print('>   @Devices> %d clients train loss vector this epoch:' % env_cfg.n_clients,
             #       np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
             # local test reports
             reporting_test_loss_vec = local_test(models, make_ids, task_cfg, env_cfg, cm_map, fed_loader_test,
@@ -523,7 +522,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
             # add to trace
             epoch_test_trace.append(
                 np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
-            # print('>   @Edge> %d clients test loss vector this epoch:' % env_cfg.n_clients,
+            # print('>   @Devices> %d clients test loss vector this epoch:' % env_cfg.n_clients,
             #       np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
 
         # Aggregation step
@@ -544,7 +543,7 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
 
         # Reporting phase: distributed test of the global model
         post_aggre_loss_vec, acc = global_test(global_model, task_cfg, env_cfg, cm_map, fed_loader_test)
-        print('>   @Edge> post-aggregation loss reports  = ',
+        print('>   @Devices> post-aggregation loss reports  = ',
               np.array(post_aggre_loss_vec) / ((np.array(client_shard_sizes)) * env_cfg.test_pct))
         # overall loss, i.e., objective (1) in McMahan's paper
         overall_loss = np.array(post_aggre_loss_vec).sum() / (data_size*env_cfg.test_pct)
@@ -572,21 +571,29 @@ def run_FL_SAFA(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_tra
                 T_train = client_shard_sizes[c_id] / env_cfg.batch_size * env_cfg.n_epochs / clients_perf_vec[c_id]
                 print('train time and comm. time locally:', T_train, T_comm)
                 # timers
-                client_round_timers[c_id] = T_comm + T_train   # including comm. and training
+                client_round_timers[c_id] = min(response_time_limit, T_comm + T_train)  # including comm. and training
                 client_round_comm_timers[c_id] = T_comm  # comm. is part of the run time
                 client_timers[c_id] += client_round_timers[c_id]  # sum up
                 client_comm_timers[c_id] += client_round_comm_timers[c_id]  # sum up
                 if c_id in picked_ids:
-                    picked_client_round_timers[c_id] = client_round_timers[c_id]  # we need to wait the picked
+                    picked_client_round_timers[c_id] = client_round_timers[c_id]  # we need to await the picked
                 if c_id in deprecated_ids:  # deprecated clients, forced to sync. at distributing step
                     client_futile_timers[c_id] += progress_trace[rd][c_id] * client_round_timers[c_id]
+                    client_round_timers[c_id] = response_time_limit  # no response
         dist_time = task_cfg.model_size * sync_count / env_cfg.bw_set[1]  # T_disk = model_size * N_sync / BW
-        round_response_time = min(response_time_limit, max(picked_client_round_timers))  # w8 to meet quota
-        global_timer += dist_time + round_response_time
-        global_T_dist_timer += dist_time
+        # round_response_time = min(response_time_limit, max(picked_client_round_timers))  # w8 to meet quota
+        # global_timer += dist_time + round_response_time
+        # global_T_dist_timer += dist_time
+        # Event updates
+        event_handler.add_parallel('time', picked_client_round_timers, reduce='max')
+        event_handler.add_sequential('time', dist_time)
+        event_handler.add_sequential('T_dist', dist_time)
 
         print('> Round client run time:', client_round_timers)  # round estimated finish time
 
+    # Stats
+    global_timer = event_handler.get_state('time')
+    global_T_dist_timer = event_handler.get_state('T_dist')
     # Traces
     print('> Train trace:')
     utils.show_epoch_trace(epoch_train_trace, env_cfg.n_clients, plotting=False, cols=1)  # training trace

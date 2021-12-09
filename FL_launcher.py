@@ -372,9 +372,9 @@ def get_empirical_lat_t(task_cfg, env_cfg):
 
 def main():
     # params to tune
-    cr_prob = float(sys.argv[1])  # E(cr)
-    lag_tol = int(sys.argv[2])  # lag tolerance, for SAFA
-    pick_C = float(sys.argv[3])  # pick percent, for FedAvg and SAFA
+    cr_prob = 0.1#float(sys.argv[1])  # E(cr)
+    lag_tol = 5#int(sys.argv[2])  # lag tolerance, for SAFA
+    pick_C = 0.1#float(sys.argv[3])  # pick percent
 
     # hook = sy.TorchHook(torch)  # no support for GPU and torch 1.3 from PySyft yet
     # communication settings, client throughput = 1.4Mbs suggested by FedCS, server bandwidth = 10Gbs
@@ -460,7 +460,7 @@ def main():
     clients_perf_vec = generate_clients_perf(env_cfg, from_file=True)  # generated, s0= 0.05,0.016,0.012 for Task 1,2,3
 
     print('> Clients perf vec:', clients_perf_vec)
-    # Maximum waiting time for clients' response in a round setting
+    # Maximum waiting time for client response in a round setting
     clients_est_round_T_train = np.array(client_shard_sizes) / env_cfg.batch_size * env_cfg.n_epochs / np.array(
         clients_perf_vec)
     response_time_limit = env_cfg.max_T if env_cfg.max_T else max(clients_est_round_T_train)+2*task_cfg.model_size/bw_set[0]
@@ -481,16 +481,16 @@ def main():
     #     run_fullyLocal(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
     #                    client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
     #                    response_time_limit)
-
-    # # reinitialize, for FedAvg
-    # glob_model = init_glob_model(env_cfg, task_cfg)
-    # print('> Launching FedAvg FL...')
-    # # run FL with FedAvg
-    # env_cfg.mode = 'Primal FedAvg'
-    # best_model, best_rd, final_loss = primal_FedAvg. \
-    #     run_FL(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
-    #            client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
-    #            response_time_limit)
+    #
+    # reinitialize, for FedAvg
+    glob_model = init_glob_model(env_cfg, task_cfg)
+    print('> Launching FedAvg FL...')
+    # run FL with FedAvg
+    env_cfg.mode = 'Primal FedAvg'
+    best_model, best_rd, final_loss = primal_FedAvg. \
+        run_FL(env_cfg, task_cfg, glob_model, c_name2idx, data_size, fed_loader_train, fed_loader_test,
+               client_shard_sizes, clients_perf_vec, clients_crash_prob_vec, crash_trace, progress_trace,
+               response_time_limit)
 
     # reinitialize, for SAFA
     glob_model = init_glob_model(env_cfg, task_cfg)

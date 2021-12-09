@@ -288,21 +288,20 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
     round_trace = []
     acc_trace = []
 
-    # Counters
-    # 1. Global timers, 1 unit = # of batches / client performance, where performance is defined as batch efficiency
-    global_timer = 0.0
-    global_T_dist_timer = 0.0
-    # 2. Client timers - record work time of each client
+    # Global event handler
+    event_handler = utils.EventHandler(['time', 'T_dist'])
+    # Local counters
+    # 1. Local timers - record work time of each client
     client_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
     client_comm_timers = [0.0 for _ in range(env_cfg.n_clients)]  # comm. totally
-    # 3. Futile counters - progression (i,e, work time) in vain caused by local crashes
+    # 2. Futile counters - progression (i,e, work time) in vain caused by local crashes
     clients_est_round_T_train = np.array(client_shard_sizes) / env_cfg.batch_size * env_cfg.n_epochs / np.array(
         clients_perf_vec)
     cross_rounders = get_cross_rounders(clients_est_round_T_train, response_time_limit)
     client_futile_timers = [0.01 for _ in range(env_cfg.n_clients)]  # totally
     eu_count = 0.0  # effective updates count
     sync_count = 0.0  # synchronization count
-    # 4. best loss (global)
+    # Best loss (global)
     best_rd = -1
     best_loss = float('inf')
     best_acc = -1.0
@@ -337,7 +336,7 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
 
         # Local training step
         for epo in range(env_cfg.n_epochs):  # local epochs (same # of epochs for each client)
-            print('\n> @Edge> local epoch #%d' % epo)
+            print('\n> @Devices> local epoch #%d' % epo)
             # invoke mini-batch training on selected clients, from the 2nd epoch
             if rd + epo == 0:  # 1st epoch all-in to get start points
                 bak_make_ids = copy.deepcopy(submit_ids)
@@ -349,7 +348,7 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
             # add to trace
             epoch_train_trace.append(
                 np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
-            # print('>   @Edge> %d clients train loss vector this epoch:' % env_cfg.n_clients,
+            # print('>   @Devices> %d clients train loss vector this epoch:' % env_cfg.n_clients,
             #       np.array(reporting_train_loss_vec) / (np.array(client_shard_sizes) * env_cfg.train_pct))
             # local test reports
             reporting_test_loss_vec = local_test(models, task_cfg, env_cfg, submit_ids, env_cfg.n_clients, cm_map,
@@ -357,7 +356,7 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
             # add to trace
             epoch_test_trace.append(
                 np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
-            # print('>   %d @Edge> clients test loss vector this epoch:' % env_cfg.n_clients,
+            # print('>   %d @Devices> clients test loss vector this epoch:' % env_cfg.n_clients,
             #       np.array(reporting_test_loss_vec) / (np.array(client_shard_sizes) * env_cfg.test_pct))
 
         # Aggregation step
@@ -366,7 +365,7 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
 
         # Reporting phase: distributed test of the global model
         post_aggre_loss_vec, acc = global_test(global_model, task_cfg, env_cfg, cm_map, fed_loader_test)
-        print('>   @Edge> post-aggregation loss reports  = ',
+        print('>   @Devices> post-aggregation loss reports  = ',
               np.array(post_aggre_loss_vec) / ((np.array(client_shard_sizes)) * env_cfg.test_pct))
         # overall loss, i.e., objective (1) in McMahan's paper
         overall_loss = np.array(post_aggre_loss_vec).sum() / (data_size*env_cfg.test_pct)
@@ -393,20 +392,29 @@ def run_FL(env_cfg, task_cfg, glob_model, cm_map, data_size, fed_loader_train, f
                 T_comm = 2*task_cfg.model_size / env_cfg.bw_set[0]
                 T_train = client_shard_sizes[c_id] / env_cfg.batch_size * env_cfg.n_epochs / clients_perf_vec[c_id]
                 print('train time and comm. time locally:', T_train, T_comm)
-                client_round_timers[c_id] = T_comm + T_train  # including comm. and training
+                client_round_timers[c_id] = min(response_time_limit, T_comm + T_train)  # including comm. and training
                 client_round_comm_timers[c_id] = T_comm  # comm. is part of the run time
                 client_timers[c_id] += client_round_timers[c_id]  # sum up
                 client_comm_timers[c_id] += client_round_comm_timers[c_id]  # sum up
                 if c_id in crash_ids:  # failed clients
                     client_futile_timers[c_id] += client_round_timers[c_id] * client_round_progress[c_id]
+                    client_round_timers[c_id] = response_time_limit  # no response
         dist_time = task_cfg.model_size * sync_count / env_cfg.bw_set[1]  # T_disk = model_size * N_sync / BW
-        round_response_time = min(response_time_limit, max(client_round_timers))
-        global_timer += dist_time + round_response_time
-        global_T_dist_timer += dist_time
+        # round_response_time = min(response_time_limit, max(client_round_timers))
+        # global_timer += dist_time + round_response_time
+        # global_T_dist_timer += dist_time
+        # Event updates
+        event_handler.add_parallel('time', client_round_timers, reduce='max')
+        event_handler.add_sequential('time', dist_time)
+        event_handler.add_sequential('T_dist', dist_time)
 
         print('> Round client run time:', client_round_timers)  # round estimated finish time
         print('> Round client progress:', client_round_progress)  # round actual progress at last
         task_cfg.lr *= task_cfg.lr_decay  # learning rate decay
+
+    # Stats
+    global_timer = event_handler.get_state('time')
+    global_T_dist_timer = event_handler.get_state('T_dist')
 
     # Traces
     print('> Train trace:')
