@@ -154,13 +154,15 @@ class EventHandler:
     def add_parallel(self, state_name, values, reduce='max'):
         """
         Add parallel events to the system and handle it
-        using specific reduce methods of 'max' or 'sum'
+        using a specific reduce method of 'none', 'max' or 'sum'
         :param state_name:
         :param values:
         :param reduce:
         :return:
         """
-        if reduce == 'max':
+        if reduce == 'none':
+            self.states[state_name] += values
+        elif reduce == 'max':
             self.states[state_name] += max(values)
         elif reduce == 'sum':
             self.states[state_name] += sum(values)
