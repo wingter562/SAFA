@@ -225,25 +225,19 @@ def aggregate(models, local_shards_sizes, data_size):
     :param data_size: total data size
     :return: a global model
     """
-    print('>   Aggregating (FedAvg)...')
-    global_model_params = []
+    print('>   Aggregating (FedCS)...')
+    # shape the global model
+    global_model = copy.deepcopy(models[0])
+    global_model_params = global_model.state_dict()
+    for pname, param in global_model_params.items():
+        global_model_params[pname] = 0.0
     client_weights_vec = np.array(local_shards_sizes) / data_size  # client weights (i.e., n_k / n)
     for m in range(len(models)):  # for each local model
-        p_pointer = 0
-        for param in models[m].parameters():
-            if m == 0:  # use the first model to shape the global one
-                global_model_params.append(param.data * client_weights_vec[m])
-            else:
-                global_model_params[p_pointer] += param.data * client_weights_vec[m]  # sum up the corresponding param
-            p_pointer += 1
+        for pname, param in models[m].state_dict().items():
+            global_model_params[pname] += param.data * client_weights_vec[m]  # sum up the corresponding param
 
-    # create a global model instance for return
-    global_model = copy.deepcopy(models[0])
-    p_pointer = 0
-    for param in global_model.parameters():
-        param.data.copy_(global_model_params[p_pointer])
-        p_pointer += 1
-
+    # load state dict back
+    global_model.load_state_dict(global_model_params)
     return global_model
 
 
