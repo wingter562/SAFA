@@ -1,9 +1,11 @@
-Conda Env: fed/
-Federated Learning and several improved versions, implemented using:
+**Paper**
+
+Wu, W., He, L.*, Lin, W., Mao, R., & Jarvis, S. (2021). SAFA: a Semi-Asynchronous Protocol for Fast Federated Learning with Low Overhead. IEEE Transactions on Computers (TC). vol. 70, no.5, pp. 655-668.
+
+**Env**
 - Python 3.7.3
-and packages including:
 - Pytorch 1.1.0
-- PySyft 0.1.2
+- PySyft 0.1.2  # optional
 - numpy 1.16.4
 
 **SAFA Protocol**
